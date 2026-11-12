@@ -1,0 +1,10 @@
+# Reproducible Linux build environment for the Tauri app (ADR-0002).
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf install -y --setopt=install_weak_deps=False \
+      webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel openssl-devel \
+      libappindicator-gtk3-devel gcc gcc-c++ make file patchelf curl wget git which \
+      nodejs npm xz findutils fuse fuse-libs desktop-file-utils \
+    && dnf clean all
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+WORKDIR /src

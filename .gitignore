@@ -1,0 +1,12 @@
+node_modules/
+dist/
+target/
+target-container/
+src-tauri/gen/schemas/
+.cargo-container/
+*.log
+target-android/
+.secrets/
+.android/
+.kotlin/
+.npm/

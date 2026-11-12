@@ -1,0 +1,17 @@
+# Android build environment: JDK 21 (Temurin), Android SDK/NDK, Rust Android targets.
+FROM localhost/japanese-reader-build-linux:latest
+RUN dnf install -y --setopt=install_weak_deps=False unzip && dnf clean all \
+ && mkdir -p /opt/jdk && curl -sSL https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse \
+    | tar -xz -C /opt/jdk --strip-components=1
+ENV ANDROID_HOME=/opt/android-sdk NDK_VERSION=28.2.13676358
+ENV NDK_HOME=/opt/android-sdk/ndk/${NDK_VERSION} JAVA_HOME=/opt/jdk PATH=/opt/jdk/bin:$PATH
+RUN mkdir -p $ANDROID_HOME/cmdline-tools && cd /tmp \
+ && curl -sSLo tools.zip https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip \
+ && unzip -q tools.zip && mv cmdline-tools $ANDROID_HOME/cmdline-tools/latest && rm tools.zip \
+ && yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null \
+ && $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}"
+RUN rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+# Versions requested by the Gradle project that `tauri android init` generates;
+# keep the SDK writable so Gradle can add components it needs later.
+RUN $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-37.0" "build-tools;36.0.0" \
+ && chmod -R a+rwX $ANDROID_HOME

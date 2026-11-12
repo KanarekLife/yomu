@@ -1,0 +1,21 @@
+[package]
+name = "japanese-reader"
+description = "Sentence-by-sentence Japanese light novel reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "japanese_reader_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+reader-core = { path = "../crates/reader-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

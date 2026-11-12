@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f97316"/><stop offset="1" stop-color="#c2410c"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#g)"/>
+  <!-- open book -->
+  <path d="M512 330c-70-50-170-70-290-62v420c120-8 220 12 290 62 70-50 170-70 290-62V268c-120-8-220 12-290 62z" fill="#fff"/>
+  <path d="M512 330v420" stroke="#c2410c" stroke-width="18" stroke-linecap="round"/>
+  <!-- one highlighted "sentence" line + ruby dots -->
+  <rect x="290" y="420" width="160" height="22" rx="11" fill="#fdba74"/>
+  <rect x="290" y="480" width="160" height="22" rx="11" fill="#fed7aa"/>
+  <rect x="290" y="540" width="120" height="22" rx="11" fill="#fed7aa"/>
+  <rect x="574" y="450" width="160" height="34" rx="17" fill="#c2410c"/>
+  <circle cx="600" cy="418" r="10" fill="#f97316"/><circle cx="634" cy="418" r="10" fill="#f97316"/><circle cx="668" cy="418" r="10" fill="#f97316"/>
+  <rect x="574" y="530" width="140" height="22" rx="11" fill="#fed7aa"/>
+</svg>
