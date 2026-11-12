@@ -1,9 +1,14 @@
-# Builds Linux, Windows and Android packages and publishes a GitHub release.
-# Trigger: push a tag like `v0.1.0`, or run manually (creates a draft release).
-name: Release
+# CI + releases (ADR-0014).
+# - push to main: test + build everything (no bundles) → warms the caches that
+#   tag builds are allowed to read (a tag run can only read caches from its own
+#   ref or the default branch).
+# - push a tag `v*`: test + build + publish a GitHub release.
+# - manual run: same as a tag, but the release is a draft.
+name: CI / Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -11,26 +16,40 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Bundles/release only for tags and manual runs; main just compiles.
+  RELEASE: ${{ github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p reader-core
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci && npm run check
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: 24, cache: pnpm }
+      - name: Install Aikido Safe Chain
+        run: |
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.27/install-safe-chain.sh -o /tmp/install-safe-chain.sh
+          echo "600ebddcb3aaf1fd53653a8d7985df44528722c0f5ee7eb9fff86f26a1a4e5a8  /tmp/install-safe-chain.sh" | sha256sum -c -
+          sh /tmp/install-safe-chain.sh --ci
+          rm /tmp/install-safe-chain.sh
+          echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
+          echo "$HOME/.safe-chain/bin" >> "$GITHUB_PATH"
+      - run: pnpm install --frozen-lockfile && pnpm check
 
   desktop:
-    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -38,24 +57,47 @@ jobs:
           - os: ubuntu-22.04
             bundles: appimage,deb,rpm
           - os: windows-latest
-            bundles: nsis,msi
+            bundles: nsis
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Linux system dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
-      - run: npx tauri build --bundles ${{ matrix.bundles }}
+          shared-key: desktop-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: 24, cache: pnpm }
+      - name: Install Aikido Safe Chain (Linux)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.27/install-safe-chain.sh -o /tmp/install-safe-chain.sh
+          echo "600ebddcb3aaf1fd53653a8d7985df44528722c0f5ee7eb9fff86f26a1a4e5a8  /tmp/install-safe-chain.sh" | sha256sum -c -
+          sh /tmp/install-safe-chain.sh --ci
+          rm /tmp/install-safe-chain.sh
+          echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
+          echo "$HOME/.safe-chain/bin" >> "$GITHUB_PATH"
+      - name: Install Aikido Safe Chain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\install-safe-chain.ps1"
+          Invoke-WebRequest -Uri "https://github.com/AikidoSec/safe-chain/releases/download/1.5.27/install-safe-chain.ps1" -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne "9B9F329CB3E6EFC3B1BFB8B0B791F546FA52AC6CA791C8E9961C5830936D64F3") { throw "safe-chain installer checksum mismatch" }
+          & $installer -ci
+          "$HOME\.safe-chain\shims" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$HOME\.safe-chain\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm tauri build ${{ (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && format('--bundles {0}', matrix.bundles) || '--no-bundle' }}
       - name: Collect bundles
+        if: env.RELEASE == 'true'
         shell: bash
         run: |
           mkdir dist-release
@@ -63,21 +105,21 @@ jobs:
             \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*.exe' -o -name '*.msi' \) \
             -exec cp {} dist-release/ \;
           ls -la dist-release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        if: env.RELEASE == 'true'
         with:
           name: bundles-${{ matrix.os }}
           path: dist-release/*
           if-no-files-found: error
 
   android:
-    needs: test
     runs-on: ubuntu-24.04
     env:
       NDK_VERSION: 28.2.13676358
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 21 }
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with: { distribution: temurin, java-version: 21, cache: gradle }
       # The runner image ships the Android SDK; add what the Gradle project needs.
       - name: Install NDK and SDK platform
         run: |
@@ -85,14 +127,26 @@ jobs:
           yes | "$SDKM" --licenses > /dev/null || true
           "$SDKM" --install "ndk;${NDK_VERSION}" "platforms;android-37.0" "build-tools;36.0.0" "platform-tools" > /dev/null
           echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      # arm64 only: every phone from the last decade; 4x faster than all ABIs.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
-        with: { key: android }
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
+        with:
+          shared-key: android
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: 24, cache: pnpm }
+      - name: Install Aikido Safe Chain
+        run: |
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.27/install-safe-chain.sh -o /tmp/install-safe-chain.sh
+          echo "600ebddcb3aaf1fd53653a8d7985df44528722c0f5ee7eb9fff86f26a1a4e5a8  /tmp/install-safe-chain.sh" | sha256sum -c -
+          sh /tmp/install-safe-chain.sh --ci
+          rm /tmp/install-safe-chain.sh
+          echo "$HOME/.safe-chain/shims" >> "$GITHUB_PATH"
+          echo "$HOME/.safe-chain/bin" >> "$GITHUB_PATH"
+      - run: pnpm install --frozen-lockfile
       - name: Signing key
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -111,29 +165,38 @@ jobs:
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           fi
           printf 'keyAlias=%s\npassword=%s\nstoreFile=%s\n' "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" "$RUNNER_TEMP/release.jks" > keystore.properties
-      - run: npx tauri android build --apk --aab
+      - name: Build
+        run: |
+          if [ "$RELEASE" = "true" ]; then
+            pnpm tauri android build --target aarch64 --apk --aab
+          else
+            pnpm tauri android build --target aarch64 --apk
+          fi
       - name: Collect packages
+        if: env.RELEASE == 'true'
         run: |
           mkdir dist-release
           v=$(node -p "require('./src-tauri/tauri.conf.json').version")
           for f in $(find src-tauri/gen/android/app/build/outputs -name '*.apk' -o -name '*.aab'); do
-            ext="${f##*.}"; cp "$f" "dist-release/Yomu_${v}_android-universal.${ext}"
+            ext="${f##*.}"; cp "$f" "dist-release/Yomu_${v}_android-arm64.${ext}"
           done
           ls -la dist-release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        if: env.RELEASE == 'true'
         with:
           name: bundles-android
           path: dist-release/*
           if-no-files-found: error
 
   release:
-    needs: [desktop, android]
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: [test, desktop, android]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: artifacts, pattern: bundles-*, merge-multiple: true }
       - run: ls -la artifacts
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           draft: ${{ github.event_name == 'workflow_dispatch' }}

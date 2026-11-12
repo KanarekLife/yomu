@@ -14,5 +14,7 @@
 | [0010](0010-platform-file-access.md) | File access across desktop & mobile | accepted |
 | [0011](0011-one-click-dictionary-setup.md) | One-click dictionary setup from a curated catalog | accepted |
 | [0012](0012-reading-options-in-reader.md) | Reading options live in the reader | accepted |
+| [0013](0013-pnpm-and-safe-chain.md) | pnpm with Aikido Safe Chain | accepted |
+| [0014](0014-ci-speed.md) | Fast CI: warm caches on main, build only what ships | accepted |
 
 New decision: copy `0000-template.md` to the next number.
