@@ -1,0 +1,2 @@
+# Shared by host and the podman build containers so neither purges the other's node_modules.
+storeDir: .pnpm-store

@@ -10,3 +10,5 @@ target-android/
 .android/
 .kotlin/
 .npm/
+scripts/screenshots/fixtures.json
+.pnpm-store/

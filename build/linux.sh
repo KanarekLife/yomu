@@ -8,6 +8,6 @@ mkdir -p .cargo-container
 TTY=""; [ -t 0 ] && TTY="-it"
 podman run --rm $TTY --userns=keep-id --security-opt label=disable \
   -v "$PWD":/src -v "$PWD/.cargo-container":/cache \
-  -e HOME=/cache/home -e CARGO_HOME=/cache/cargo -e npm_config_cache=/cache/npm \
+  -e HOME=/cache/home -e CARGO_HOME=/cache/cargo -e npm_config_cache=/cache/npm -e PNPM_HOME=/cache/pnpm -e CI=true \
   -e CARGO_TARGET_DIR=/src/target-container -e APPIMAGE_EXTRACT_AND_RUN=1 -e NO_STRIP=1 \
-  japanese-reader-build-linux bash -lc 'export PATH=/opt/cargo/bin:$PATH RUSTUP_HOME=/opt/rustup; mkdir -p $HOME; npm ci --no-audit --no-fund && npx tauri build --bundles appimage,rpm,deb '"$*"
+  japanese-reader-build-linux bash -lc 'export PATH=/opt/safe-chain/shims:/opt/safe-chain/bin:/opt/cargo/bin:$PATH RUSTUP_HOME=/opt/rustup; mkdir -p $HOME; pnpm install --frozen-lockfile && pnpm tauri build --bundles appimage,rpm,deb '"$*"
