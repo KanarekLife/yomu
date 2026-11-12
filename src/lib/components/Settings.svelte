@@ -249,7 +249,7 @@
     </section>
 
     <section class="about muted small">
-      <p><b>Yomu</b> 0.1.0 · Tokenizer: lindera + IPADIC · Dictionaries: Yomitan format</p>
+      <p><b>Yomu</b> 0.1.1 · Tokenizer: lindera + IPADIC · Dictionaries: Yomitan format</p>
     </section>
   </div>
 </div>
