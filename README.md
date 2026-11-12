@@ -5,6 +5,22 @@ Yomitan-style dictionary lookups, and on-demand LLM translations that explain ea
 
 Runs on **Linux** and **Android** (primary targets), plus Windows, macOS and iOS (Tauri 2).
 
+**Download:** [latest release](https://github.com/KanarekLife/yomu/releases/latest): AppImage, .deb and .rpm for Linux, an installer for Windows, and an APK for Android.
+
+<p align="center">
+  <img src="docs/screenshots/reader.png" alt="One sentence at a time, with furigana" width="100%">
+</p>
+
+| Dictionary lookup | Translation and breakdown | On a phone |
+|---|---|---|
+| <img src="docs/screenshots/lookup.png" alt="Tap a word for a Yomitan-style lookup with frequency and pitch accent"> | <img src="docs/screenshots/translation.png" alt="LLM translation with word-by-word breakdown"> | <img src="docs/screenshots/mobile-lookup.png" alt="Lookup as a bottom sheet on a phone (sepia theme)"> |
+
+| Library | Quick reading options |
+|---|---|
+| <img src="docs/screenshots/library.png" alt="Library with reading progress"> | <img src="docs/screenshots/options.png" alt="Text size, font, theme and toggles while reading" width="300"> |
+
+<sub>Screenshots use public-domain texts (夏目漱石『吾輩は猫である』) and the real Jitendex, JPDB and Kanjium dictionaries. To regenerate them, see [`scripts/screenshots`](scripts/screenshots/capture.mjs).</sub>
+
 ## Features
 
 - **EPUB import** (EPUB 2 and 3, Calibre/Sigil output). The book's own `<ruby>` furigana is kept and preferred.
@@ -32,16 +48,33 @@ Touch: swipe left or right to move between sentences; tap a word to look it up.
 
 ## Development
 
-Requirements: Rust (stable), Node 20+, and the
+Requirements: Rust (stable), Node 22+, **pnpm** (pinned in `package.json`), and the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 `mise.toml` pins the toolchain (`mise install`).
 
+JavaScript dependencies are installed through [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain),
+which blocks known-malicious packages and versions published less than 48 hours ago (ADR-0013).
+Install it once, then restart your terminal:
+
 ```sh
-npm install
-npm run tauri dev                         # desktop dev build with hot reload
+curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.27/install-safe-chain.sh -o /tmp/isc.sh \
+  && echo "600ebddcb3aaf1fd53653a8d7985df44528722c0f5ee7eb9fff86f26a1a4e5a8  /tmp/isc.sh" | sha256sum -c - && sh /tmp/isc.sh
+pnpm safe-chain-verify                    # → OK: Safe-chain works!
+```
+
+```sh
+pnpm install
+pnpm tauri dev                            # desktop dev build with hot reload
 cargo test -p reader-core                 # core unit tests (no GUI deps needed)
 cargo run -p reader-core --release --example inspect_epub -- book.epub 40   # inspect segmentation and furigana
-npm run check                             # Svelte/TypeScript checks
+pnpm check                                # Svelte/TypeScript checks
+```
+
+Screenshots (headless Chromium, real UI with fixtures from the real core):
+
+```sh
+cargo run -p reader-core --release --example screenshot_fixtures -- scripts/screenshots/fixtures.json
+pnpm build && pnpx playwright install chromium && pnpm screenshots   # → docs/screenshots/
 ```
 
 ### Reproducible builds (podman, no host packages needed)
@@ -53,9 +86,10 @@ build/linux.sh                # AppImage, .rpm and .deb → target-container/rel
 build/android.sh --debug      # APK → src-tauri/gen/android/app/build/outputs/apk/
 ```
 
-For a release Android build, configure signing in `src-tauri/gen/android` (see the
-[Tauri signing guide](https://v2.tauri.app/distribute/sign/android/)).
-iOS builds need macOS with Xcode: `npm run tauri ios init && npm run tauri ios build`.
+Releases are built by GitHub Actions (`.github/workflows/release.yml`) when you push a `v*` tag.
+Android release signing reads the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS` and
+`ANDROID_KEY_PASSWORD` repository secrets.
+iOS builds need macOS with Xcode: `pnpm tauri ios init && pnpm tauri ios build`.
 
 ## Layout
 
