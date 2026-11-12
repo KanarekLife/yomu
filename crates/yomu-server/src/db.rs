@@ -10,12 +10,18 @@ use rustls::{
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 
-use crate::{auth, config::Config};
+use crate::config::Config;
 
 /// Embedded SQL migrations, applied in order. Never edit an applied one;
 /// append a new file instead.
-const MIGRATIONS: &[(i32, &str, &str)] =
-    &[(1, "init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i32, &str, &str)] = &[
+    (1, "init", include_str!("../migrations/0001_init.sql")),
+    (
+        2,
+        "separate_admins",
+        include_str!("../migrations/0002_separate_admins.sql"),
+    ),
+];
 
 /// Builds the pool. TLS follows libpq's `sslmode` semantics from
 /// `DATABASE_URL` (`disable` / `prefer` (default) / `require`): the channel is
@@ -78,6 +84,12 @@ pub async fn wait_for_db(pool: &Pool, max_wait: Duration) -> Result<(), String> 
 /// Applies pending migrations in one transaction, serialised across replicas
 /// by an advisory lock.
 pub async fn migrate(pool: &Pool) -> Result<(), String> {
+    migrate_to(pool, i32::MAX).await
+}
+
+/// Applies pending migrations up to and including `max_version` (tests use
+/// this to start from an older schema).
+pub async fn migrate_to(pool: &Pool, max_version: i32) -> Result<(), String> {
     let mut client = pool.get().await.map_err(|e| e.to_string())?;
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     tx.execute("SELECT pg_advisory_xact_lock(7340987001)", &[])
@@ -91,7 +103,7 @@ pub async fn migrate(pool: &Pool) -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())?;
-    for (version, name, sql) in MIGRATIONS {
+    for (version, name, sql) in MIGRATIONS.iter().filter(|m| m.0 <= max_version) {
         let done = tx
             .query_opt(
                 "SELECT 1 FROM schema_migrations WHERE version = $1",
@@ -115,41 +127,6 @@ pub async fn migrate(pool: &Pool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     tx.commit().await.map_err(|e| e.to_string())
-}
-
-/// Creates the configured admin when the server has no admin at all. If a
-/// user with that name already exists it is promoted, re-enabled and gets the
-/// configured password (a recovery path for a lost admin).
-pub async fn ensure_admin(pool: &Pool, config: &Config) -> Result<(), String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
-    let has_admin = client
-        .query_one("SELECT EXISTS (SELECT 1 FROM users WHERE is_admin)", &[])
-        .await
-        .map_err(|e| e.to_string())?
-        .get::<_, bool>(0);
-    if has_admin {
-        return Ok(());
-    }
-    let (Some(user), Some(password)) = (&config.admin_user, &config.admin_password) else {
-        tracing::warn!(
-            "no admin user exists; set YOMU_ADMIN_USER and YOMU_ADMIN_PASSWORD to create one"
-        );
-        return Ok(());
-    };
-    let username = auth::normalize_username(user);
-    auth::validate_username(&username).map_err(|e| format!("YOMU_ADMIN_USER: {e}"))?;
-    let hash = auth::hash_password(password.clone()).await;
-    client
-        .execute(
-            "INSERT INTO users (username, password_hash, is_admin) VALUES ($1, $2, TRUE)
-             ON CONFLICT (username) DO UPDATE
-               SET password_hash = EXCLUDED.password_hash, is_admin = TRUE, disabled = FALSE",
-            &[&username, &hash],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    tracing::info!(username, "created admin user");
-    Ok(())
 }
 
 /// Accepts any server certificate (libpq `sslmode=require` semantics) while

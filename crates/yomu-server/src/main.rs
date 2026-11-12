@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use tracing_subscriber::EnvFilter;
 use yomu_server::{app, db, AppState, Config};
@@ -24,8 +24,7 @@ async fn run() -> Result<(), String> {
     // Startup may wait minutes for a cold database; stay responsive to SIGTERM.
     let startup = async {
         db::wait_for_db(&pool, Duration::from_secs(300)).await?;
-        db::migrate(&pool).await?;
-        db::ensure_admin(&pool, &config).await
+        db::migrate(&pool).await
     };
     tokio::select! {
         r = startup => r?,
@@ -33,10 +32,17 @@ async fn run() -> Result<(), String> {
     }
 
     let listen = config.listen;
-    let state = AppState {
-        pool,
-        config: Arc::new(config),
-    };
+    match (&config.oidc, &config.local_admin) {
+        (None, None) => tracing::warn!(
+            "admin panel disabled: configure YOMU_OIDC_* or YOMU_ADMIN_USER/YOMU_ADMIN_PASSWORD"
+        ),
+        (oidc, local) => tracing::info!(
+            oidc = oidc.as_ref().map(|o| o.issuer.as_str()),
+            local_admin = local.is_some(),
+            "admin panel sign-in"
+        ),
+    }
+    let state = AppState::new(pool, config);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|e| format!("cannot listen on {listen}: {e}"))?;

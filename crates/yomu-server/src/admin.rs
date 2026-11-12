@@ -1,5 +1,6 @@
 //! Server-rendered admin panel under `/admin`. Plain HTML forms, no JS.
-//! CSRF protection relies on the `SameSite=Strict` session cookie.
+//! CSRF protection relies on the `SameSite=Strict` session cookie. Panel
+//! admins (OIDC or the env break-glass login) are not app users.
 
 // Handlers return `Result<Response, Response>`; boxing the error buys nothing.
 #![allow(clippy::result_large_err)]
@@ -13,9 +14,17 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::{auth, AppState};
+use std::time::Duration;
+
+use crate::{
+    auth,
+    oidc::{self, AuthRequest, OidcError},
+    AppState,
+};
 
 const COOKIE: &str = "yomu_admin";
+/// Holds state/nonce/PKCE verifier between redirect and callback.
+const OIDC_COOKIE: &str = "yomu_oidc";
 const SESSION_DAYS: i64 = 7;
 
 pub fn router() -> Router<AppState> {
@@ -23,11 +32,12 @@ pub fn router() -> Router<AppState> {
         .route("/", get(dashboard))
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", get(logout).post(logout))
+        .route("/oidc/start", get(oidc_start))
+        .route("/oidc/callback", get(oidc_callback))
         .route("/users", post(create_user))
         .route("/users/{id}", get(user_page))
         .route("/users/{id}/password", post(reset_password))
         .route("/users/{id}/toggle-disabled", post(toggle_disabled))
-        .route("/users/{id}/toggle-admin", post(toggle_admin))
         .route("/users/{id}/delete", post(delete_user))
         .route("/users/{id}/revoke", post(revoke_token))
 }
@@ -141,8 +151,8 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-fn internal(e: impl std::fmt::Display) -> Response {
-    tracing::error!(error = %e, "admin panel error");
+fn internal(e: impl std::fmt::Debug) -> Response {
+    tracing::error!(error = ?e, "admin panel error");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
 }
 
@@ -150,10 +160,26 @@ type PageResult = Result<Response, Response>;
 
 // ---------- session extractor ----------
 
-/// A logged-in, enabled admin. Anything else is redirected to the login page.
+/// A signed-in panel admin. Admins are not app users: the session names an
+/// identity such as `oidc:<sub> (<name>)` or `local:<name>`.
 pub struct Admin {
-    pub user_id: i64,
-    pub username: String,
+    pub identity: String,
+}
+
+/// Whether a stored session identity is still allowed by the current config
+/// (disabling a method, or renaming the local admin, ends those sessions).
+fn identity_allowed(state: &AppState, identity: &str) -> bool {
+    if identity.starts_with("oidc:") {
+        state.oidc.is_some()
+    } else if let Some(name) = identity.strip_prefix("local:") {
+        state
+            .config
+            .local_admin
+            .as_ref()
+            .is_some_and(|l| l.username == name)
+    } else {
+        false
+    }
 }
 
 impl FromRequestParts<AppState> for Admin {
@@ -163,37 +189,74 @@ impl FromRequestParts<AppState> for Admin {
         let to_login = || Redirect::to("/admin/login").into_response();
         let sid = cookie_value(&parts.headers, COOKIE).ok_or_else(to_login)?;
         let client = state.pool.get().await.map_err(internal)?;
-        let row = client
+        let identity: String = client
             .query_opt(
-                "SELECT u.id, u.username FROM admin_sessions s JOIN users u ON u.id = s.user_id
-                 WHERE s.id_hash = $1 AND s.expires_at > now() AND u.is_admin AND NOT u.disabled",
+                "SELECT admin FROM admin_sessions WHERE id_hash = $1 AND expires_at > now()",
                 &[&auth::hash_secret(&sid)],
             )
             .await
             .map_err(internal)?
-            .ok_or_else(to_login)?;
-        Ok(Admin {
-            user_id: row.get(0),
-            username: row.get(1),
-        })
+            .ok_or_else(to_login)?
+            .get(0);
+        if !identity_allowed(state, &identity) {
+            return Err(to_login());
+        }
+        Ok(Admin { identity })
     }
+}
+
+/// Stores a new session for `identity` and redirects to the dashboard.
+async fn start_session(state: &AppState, identity: &str) -> PageResult {
+    let secret = auth::generate_secret();
+    let client = state.pool.get().await.map_err(internal)?;
+    client
+        .execute("DELETE FROM admin_sessions WHERE expires_at < now()", &[])
+        .await
+        .map_err(internal)?;
+    client
+        .execute(
+            "INSERT INTO admin_sessions (id_hash, admin, expires_at)
+             VALUES ($1, $2, now() + make_interval(days => $3::int))",
+            &[&secret.hash, &identity, &(SESSION_DAYS as i32)],
+        )
+        .await
+        .map_err(internal)?;
+    tracing::info!(admin = identity, "admin signed in");
+    let cookie = format!(
+        "{COOKIE}={}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age={}",
+        secret.token,
+        SESSION_DAYS * 86400
+    );
+    let mut resp = Redirect::to("/admin").into_response();
+    resp.headers_mut()
+        .append(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    Ok(resp)
 }
 
 // ---------- login / logout ----------
 
-async fn login_page(Query(flash): Query<Flash>) -> Html<String> {
-    page(
-        "Log in",
-        &format!(
-            r#"<h1>Yomu admin</h1>{}
-<form method="post" action="/admin/login">
-<p><label>Username<br><input type="text" name="username" autocomplete="username" required autofocus></label></p>
+async fn login_page(State(state): State<AppState>, Query(flash): Query<Flash>) -> Html<String> {
+    let mut body = format!("<h1>Yomu admin</h1>{}", flash.html());
+    if state.oidc.is_some() {
+        body += r#"<p><a href="/admin/oidc/start"><button type="button">Sign in with SSO</button></a></p>"#;
+    }
+    if state.config.local_admin.is_some() {
+        if state.oidc.is_some() {
+            body += "<p><small>or use the local admin account:</small></p>";
+        }
+        body += r#"<form method="post" action="/admin/login">
+<p><label>Username<br><input type="text" name="username" autocomplete="username" required></label></p>
 <p><label>Password<br><input type="password" name="password" autocomplete="current-password" required></label></p>
 <p><button type="submit">Log in</button></p>
-</form><p><a href="/">&larr; back</a></p>"#,
-            flash.html()
-        ),
-    )
+</form>"#;
+    }
+    if state.oidc.is_none() && state.config.local_admin.is_none() {
+        body += r#"<p class="err">The admin panel is disabled: no sign-in method is configured.
+Set <code>YOMU_OIDC_ISSUER</code>/<code>YOMU_OIDC_CLIENT_ID</code>/<code>YOMU_OIDC_CLIENT_SECRET</code>
+or <code>YOMU_ADMIN_USER</code>/<code>YOMU_ADMIN_PASSWORD</code>.</p>"#;
+    }
+    body += r#"<p><small>App accounts cannot sign in here.</small></p><p><a href="/">&larr; back</a></p>"#;
+    page("Log in", &body)
 }
 
 #[derive(Deserialize)]
@@ -203,48 +266,19 @@ struct LoginForm {
 }
 
 async fn login_submit(State(state): State<AppState>, Form(f): Form<LoginForm>) -> PageResult {
-    let username = auth::normalize_username(&f.username);
-    let client = state.pool.get().await.map_err(internal)?;
-    let row = client
-        .query_opt(
-            "SELECT id, password_hash, is_admin, disabled FROM users WHERE username = $1",
-            &[&username],
-        )
-        .await
-        .map_err(internal)?;
-    let hash = row.as_ref().map(|r| r.get::<_, String>(1));
-    let ok = auth::verify_password(f.password, hash).await;
-    let user_id: i64 = match row {
-        Some(r) if ok && r.get::<_, bool>(2) && !r.get::<_, bool>(3) => r.get(0),
-        _ => {
-            return Ok(back(
-                "/admin/login",
-                Err("Invalid credentials or not an admin."),
-            ))
-        }
+    let Some(local) = &state.config.local_admin else {
+        return Ok(back("/admin/login", Err("Local admin login is disabled.")));
     };
-    let secret = auth::generate_secret();
-    client
-        .execute("DELETE FROM admin_sessions WHERE expires_at < now()", &[])
-        .await
-        .map_err(internal)?;
-    client
-        .execute(
-            "INSERT INTO admin_sessions (id_hash, user_id, expires_at)
-             VALUES ($1, $2, now() + make_interval(days => $3::int))",
-            &[&secret.hash, &user_id, &(SESSION_DAYS as i32)],
-        )
-        .await
-        .map_err(internal)?;
-    let cookie = format!(
-        "{COOKIE}={}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age={}",
-        secret.token,
-        SESSION_DAYS * 86400
-    );
-    let mut resp = Redirect::to("/admin").into_response();
-    resp.headers_mut()
-        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
-    Ok(resp)
+    let name = auth::normalize_username(&f.username);
+    // Non-short-circuiting `&`: both comparisons always run.
+    let ok =
+        auth::secret_eq(&name, &local.username) & auth::secret_eq(&f.password, &local.password);
+    if !ok {
+        tracing::warn!("failed local admin login");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Ok(back("/admin/login", Err("Invalid credentials.")));
+    }
+    start_session(&state, &format!("local:{}", local.username)).await
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> PageResult {
@@ -268,6 +302,107 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> PageResult
     Ok(resp)
 }
 
+// ---------- OIDC ----------
+
+fn clear_oidc_cookie(resp: &mut Response) {
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "yomu_oidc=; HttpOnly; Secure; SameSite=Lax; Path=/admin/oidc; Max-Age=0",
+        ),
+    );
+}
+
+fn oidc_error_page(status: StatusCode, msg: &str) -> Response {
+    let body = format!(
+        r#"<h1>Sign-in failed</h1><p class="err">{}</p><p><a href="/admin/login">Back to login</a></p>"#,
+        escape(msg)
+    );
+    let mut resp = (status, page("Sign-in failed", &body)).into_response();
+    clear_oidc_cookie(&mut resp);
+    resp
+}
+
+async fn oidc_start(State(state): State<AppState>) -> Response {
+    let Some(oidc) = &state.oidc else {
+        return oidc_error_page(StatusCode::NOT_FOUND, "SSO is not configured.");
+    };
+    // Fail closed: no discovery, no sign-in.
+    let disc = match oidc.discovery().await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "OIDC discovery failed");
+            return oidc_error_page(
+                StatusCode::BAD_GATEWAY,
+                &format!("The identity provider is unavailable: {e}"),
+            );
+        }
+    };
+    let req = AuthRequest::generate();
+    let location = oidc::authorization_url(&disc, &oidc.config, &req);
+    let cookie = format!(
+        "{OIDC_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/admin/oidc; Max-Age=600",
+        req.to_cookie()
+    );
+    let mut resp = Redirect::to(&location).into_response();
+    resp.headers_mut()
+        .append(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+    resp
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+async fn oidc_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<CallbackQuery>,
+) -> Response {
+    let Some(oidc) = &state.oidc else {
+        return oidc_error_page(StatusCode::NOT_FOUND, "SSO is not configured.");
+    };
+    if let Some(err) = q.error {
+        let desc = q.error_description.unwrap_or_default();
+        return oidc_error_page(
+            StatusCode::BAD_REQUEST,
+            &format!("The identity provider refused the sign-in: {err} {desc}"),
+        );
+    }
+    let Some(req) = cookie_value(&headers, OIDC_COOKIE).and_then(|c| AuthRequest::from_cookie(&c))
+    else {
+        return oidc_error_page(
+            StatusCode::BAD_REQUEST,
+            "Sign-in session expired or missing; please start again.",
+        );
+    };
+    let (Some(code), Some(returned_state)) = (q.code, q.state) else {
+        return oidc_error_page(StatusCode::BAD_REQUEST, "Missing code or state.");
+    };
+    match oidc.complete(&req, &code, &returned_state).await {
+        Ok(identity) => {
+            let mut resp = match start_session(&state, &identity).await {
+                Ok(r) | Err(r) => r,
+            };
+            clear_oidc_cookie(&mut resp);
+            resp
+        }
+        Err(OidcError::BadRequest(m)) => oidc_error_page(StatusCode::BAD_REQUEST, &m),
+        Err(OidcError::Denied(m)) => {
+            tracing::warn!(reason = %m, "OIDC sign-in denied");
+            oidc_error_page(StatusCode::FORBIDDEN, &format!("Access denied: {m}"))
+        }
+        Err(OidcError::Provider(m)) => {
+            tracing::error!(error = %m, "OIDC sign-in failed");
+            oidc_error_page(StatusCode::BAD_GATEWAY, &m)
+        }
+    }
+}
+
 // ---------- dashboard ----------
 
 async fn dashboard(
@@ -278,7 +413,7 @@ async fn dashboard(
     let client = state.pool.get().await.map_err(internal)?;
     let rows = client
         .query(
-            "SELECT u.id, u.username, u.is_admin, u.disabled,
+            "SELECT u.id, u.username, u.disabled,
                     (SELECT count(*) FROM books b WHERE b.user_id = u.id AND NOT b.deleted),
                     (SELECT COALESCE(sum(size), 0)::int8 FROM files f WHERE f.user_id = u.id)
                   + (SELECT COALESCE(sum(octet_length(t.text) + octet_length(t.key) + octet_length(t.lang) + 48), 0)::int8
@@ -294,34 +429,34 @@ async fn dashboard(
     for r in &rows {
         let id: i64 = r.get(0);
         let name: String = r.get(1);
-        let yes = |b: bool| if b { "yes" } else { "" };
         table += &format!(
-            r#"<tr><td><a href="/admin/users/{id}">{}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>"#,
+            r#"<tr><td><a href="/admin/users/{id}">{}</a></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>"#,
             escape(&name),
-            yes(r.get(2)),
-            yes(r.get(3)),
-            r.get::<_, i64>(4),
-            human_bytes(r.get(5)),
-            r.get::<_, i64>(6),
-            escape(&r.get::<_, String>(7)),
+            if r.get(2) { "yes" } else { "" },
+            r.get::<_, i64>(3),
+            human_bytes(r.get(4)),
+            r.get::<_, i64>(5),
+            escape(&r.get::<_, String>(6)),
         );
+    }
+    if rows.is_empty() {
+        table = r#"<tr><td colspan="6">No users yet.</td></tr>"#.into();
     }
     let body = format!(
         r#"<header><h1>Yomu admin</h1><span>{me} · <a href="/admin/logout">log out</a></span></header>
 {flash}
-<h2>Users</h2>
+<h2>App users</h2>
 <div class="scroll"><table>
-<tr><th>Username</th><th>Admin</th><th>Disabled</th><th>Books</th><th>Storage</th><th>Devices</th><th>Created</th></tr>
+<tr><th>Username</th><th>Disabled</th><th>Books</th><th>Storage</th><th>Devices</th><th>Created</th></tr>
 {table}</table></div>
 <fieldset><legend>Create user</legend>
 <form method="post" action="/admin/users">
 <p><label>Username<br><input type="text" name="username" required autocomplete="off"></label></p>
 <p><label>Password<br><input type="password" name="password" required minlength="8" autocomplete="new-password"></label></p>
-<p><label><input type="checkbox" name="is_admin" value="on"> Admin</label></p>
 <p><button type="submit">Create</button></p>
 </form></fieldset>
-<p><small>Yomu sync server {ver}</small></p>"#,
-        me = escape(&admin.username),
+<p><small>Admins are separate from app users; to use the app yourself, create a user for it. Yomu sync server {ver}</small></p>"#,
+        me = escape(&admin.identity),
         flash = flash.html(),
         ver = env!("CARGO_PKG_VERSION"),
     );
@@ -332,12 +467,11 @@ async fn dashboard(
 struct CreateUserForm {
     username: String,
     password: String,
-    is_admin: Option<String>,
 }
 
 async fn create_user(
     State(state): State<AppState>,
-    _admin: Admin,
+    admin: Admin,
     Form(f): Form<CreateUserForm>,
 ) -> PageResult {
     let username = auth::normalize_username(&f.username);
@@ -348,15 +482,16 @@ async fn create_user(
     let client = state.pool.get().await.map_err(internal)?;
     let n = client
         .execute(
-            "INSERT INTO users (username, password_hash, is_admin) VALUES ($1, $2, $3)
+            "INSERT INTO users (username, password_hash) VALUES ($1, $2)
              ON CONFLICT (username) DO NOTHING",
-            &[&username, &hash, &f.is_admin.is_some()],
+            &[&username, &hash],
         )
         .await
         .map_err(internal)?;
     if n == 0 {
         return Ok(back("/admin", Err("That username is taken.")));
     }
+    tracing::info!(admin = admin.identity, username, "user created");
     Ok(back("/admin", Ok(&format!("Created user {username}."))))
 }
 
@@ -364,31 +499,23 @@ async fn create_user(
 
 struct UserRow {
     username: String,
-    is_admin: bool,
     disabled: bool,
 }
 
-async fn load_user(
-    client: &impl deadpool_postgres::GenericClient,
-    id: i64,
-) -> Result<Option<UserRow>, Response> {
+async fn load_user(client: &tokio_postgres::Client, id: i64) -> Result<Option<UserRow>, Response> {
     Ok(client
-        .query_opt(
-            "SELECT username, is_admin, disabled FROM users WHERE id = $1",
-            &[&id],
-        )
+        .query_opt("SELECT username, disabled FROM users WHERE id = $1", &[&id])
         .await
         .map_err(internal)?
         .map(|r| UserRow {
             username: r.get(0),
-            is_admin: r.get(1),
-            disabled: r.get(2),
+            disabled: r.get(1),
         }))
 }
 
 async fn user_page(
     State(state): State<AppState>,
-    admin: Admin,
+    _admin: Admin,
     Path(id): Path<i64>,
     Query(flash): Query<Flash>,
 ) -> PageResult {
@@ -420,12 +547,11 @@ async fn user_page(
     if tokens.is_empty() {
         devices = r#"<tr><td colspan="4">No devices signed in.</td></tr>"#.into();
     }
-    let is_self = id == admin.user_id;
     let name = escape(&u.username);
     let body = format!(
         r#"<header><h1>{name}</h1><span><a href="/admin">&larr; all users</a> · <a href="/admin/logout">log out</a></span></header>
 {flash}
-<p>Admin: <b>{adm}</b> · Disabled: <b>{dis}</b>{you}</p>
+<p>Disabled: <b>{dis}</b></p>
 <h2>Devices</h2>
 <div class="scroll"><table><tr><th>Device</th><th>Signed in (UTC)</th><th>Last used (UTC)</th><th></th></tr>{devices}</table></div>
 <fieldset><legend>Reset password</legend>
@@ -435,7 +561,6 @@ async fn user_page(
 <p><button type="submit">Set password</button></p></form></fieldset>
 <fieldset><legend>Status</legend>
 <form class="inline" method="post" action="/admin/users/{id}/toggle-disabled"><button type="submit">{dis_btn}</button></form>
-<form class="inline" method="post" action="/admin/users/{id}/toggle-admin"><button type="submit">{adm_btn}</button></form>
 </fieldset>
 <fieldset><legend class="danger">Delete user</legend>
 <form method="post" action="/admin/users/{id}/delete">
@@ -443,18 +568,11 @@ async fn user_page(
 <p><input type="text" name="confirm" required autocomplete="off" placeholder="{name}"></p>
 <p><button type="submit" class="danger">Delete permanently</button></p></form></fieldset>"#,
         flash = flash.html(),
-        adm = if u.is_admin { "yes" } else { "no" },
         dis = if u.disabled { "yes" } else { "no" },
-        you = if is_self { " · (this is you)" } else { "" },
         dis_btn = if u.disabled {
             "Enable account"
         } else {
             "Disable account"
-        },
-        adm_btn = if u.is_admin {
-            "Remove admin"
-        } else {
-            "Make admin"
         },
     );
     Ok(page(&u.username, &body).into_response())
@@ -497,73 +615,26 @@ async fn reset_password(
     Ok(back(&path, Ok("Password updated.")))
 }
 
-/// Runs `f` inside a transaction holding the admin-change lock, after
-/// checking that the change keeps at least one enabled admin.
-async fn guarded_change(
-    state: &AppState,
-    target: i64,
-    sql: &str,
-    would_remove_enabled_admin: impl Fn(&UserRow) -> bool,
-) -> Result<Result<(), &'static str>, Response> {
-    let mut client = state.pool.get().await.map_err(internal)?;
-    let tx = client.transaction().await.map_err(internal)?;
-    tx.execute("SELECT pg_advisory_xact_lock(2, 0)", &[])
-        .await
-        .map_err(internal)?;
-    let Some(u) = load_user(&tx, target).await? else {
-        return Ok(Err("No such user."));
-    };
-    if would_remove_enabled_admin(&u) {
-        let admins: i64 = tx
-            .query_one(
-                "SELECT count(*) FROM users WHERE is_admin AND NOT disabled",
-                &[],
-            )
-            .await
-            .map_err(internal)?
-            .get(0);
-        if admins <= 1 {
-            return Ok(Err("Refused: this is the last enabled admin."));
-        }
-    }
-    tx.execute(sql, &[&target]).await.map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    Ok(Ok(()))
-}
-
 async fn toggle_disabled(
-    State(state): State<AppState>,
-    admin: Admin,
-    Path(id): Path<i64>,
-) -> PageResult {
-    let path = format!("/admin/users/{id}");
-    if id == admin.user_id {
-        return Ok(back(&path, Err("You cannot disable yourself.")));
-    }
-    let r = guarded_change(
-        &state,
-        id,
-        "UPDATE users SET disabled = NOT disabled WHERE id = $1",
-        |u| u.is_admin && !u.disabled,
-    )
-    .await?;
-    Ok(back(&path, r.map(|_| "Account status changed.")))
-}
-
-async fn toggle_admin(
     State(state): State<AppState>,
     _admin: Admin,
     Path(id): Path<i64>,
 ) -> PageResult {
-    let path = format!("/admin/users/{id}");
-    let r = guarded_change(
-        &state,
-        id,
-        "UPDATE users SET is_admin = NOT is_admin WHERE id = $1",
-        |u| u.is_admin && !u.disabled,
-    )
-    .await?;
-    Ok(back(&path, r.map(|_| "Admin role changed.")))
+    let client = state.pool.get().await.map_err(internal)?;
+    let n = client
+        .execute(
+            "UPDATE users SET disabled = NOT disabled WHERE id = $1",
+            &[&id],
+        )
+        .await
+        .map_err(internal)?;
+    if n == 0 {
+        return Ok(back("/admin", Err("No such user.")));
+    }
+    Ok(back(
+        &format!("/admin/users/{id}"),
+        Ok("Account status changed."),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -578,27 +649,23 @@ async fn delete_user(
     Form(f): Form<DeleteForm>,
 ) -> PageResult {
     let path = format!("/admin/users/{id}");
-    if id == admin.user_id {
-        return Ok(back(&path, Err("You cannot delete yourself.")));
+    let client = state.pool.get().await.map_err(internal)?;
+    let Some(u) = load_user(&client, id).await? else {
+        return Ok(back("/admin", Err("No such user.")));
+    };
+    if u.username != auth::normalize_username(&f.confirm) {
+        return Ok(back(&path, Err("Confirmation did not match the username.")));
     }
-    {
-        let client = state.pool.get().await.map_err(internal)?;
-        match load_user(&client, id).await? {
-            None => return Ok(back("/admin", Err("No such user."))),
-            Some(u) if u.username != auth::normalize_username(&f.confirm) => {
-                return Ok(back(&path, Err("Confirmation did not match the username.")))
-            }
-            Some(_) => {}
-        }
-    }
-    match guarded_change(&state, id, "DELETE FROM users WHERE id = $1", |u| {
-        u.is_admin && !u.disabled
-    })
-    .await?
-    {
-        Ok(()) => Ok(back("/admin", Ok("User deleted."))),
-        Err(e) => Ok(back(&path, Err(e))),
-    }
+    client
+        .execute("DELETE FROM users WHERE id = $1", &[&id])
+        .await
+        .map_err(internal)?;
+    tracing::info!(
+        admin = admin.identity,
+        username = u.username,
+        "user deleted"
+    );
+    Ok(back("/admin", Ok("User deleted.")))
 }
 
 #[derive(Deserialize)]

@@ -2,7 +2,7 @@
 //! `YOMU_TEST_DATABASE_URL` is set, e.g.
 //! `YOMU_TEST_DATABASE_URL=postgres://postgres:test@localhost:55432/postgres`.
 
-use std::sync::Arc;
+mod common;
 
 use axum::{
     body::Body,
@@ -12,22 +12,11 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
-use yomu_server::{app, auth, db, AppState, Config};
+use yomu_server::{app, auth, AppState};
 
 async fn setup() -> Option<(Router, deadpool_postgres::Pool)> {
-    let url = std::env::var("YOMU_TEST_DATABASE_URL").ok()?;
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let config = Config::for_database(url);
-    let pool = db::make_pool(&config).unwrap();
-    db::wait_for_db(&pool, std::time::Duration::from_secs(10))
-        .await
-        .unwrap();
-    db::migrate(&pool).await.unwrap();
-    let state = AppState {
-        pool: pool.clone(),
-        config: Arc::new(config),
-    };
-    Some((app(state), pool))
+    let (config, pool) = common::fresh_db(None).await?;
+    Some((app(AppState::new(pool.clone(), config)), pool))
 }
 
 async fn call(
@@ -135,7 +124,7 @@ async fn login_sync_and_files_roundtrip() {
     let b = login(&app, &user, "password123", "phone").await;
     let (s, v) = json_call(&app, Method::GET, "/api/v1/me", Some(&a), Value::Null).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v, json!({"username": user, "is_admin": false}));
+    assert_eq!(v, json!({"username": user}));
     let (s, _) = json_call(&app, Method::GET, "/api/v1/me", Some("nope"), Value::Null).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 

@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod oidc;
 pub mod sync;
 
 use std::sync::Arc;
@@ -20,9 +21,20 @@ pub use config::Config;
 pub struct AppState {
     pub pool: deadpool_postgres::Pool,
     pub config: Arc<Config>,
+    /// Present when OIDC panel sign-in is configured.
+    pub oidc: Option<Arc<oidc::Oidc>>,
 }
 
 impl AppState {
+    pub fn new(pool: deadpool_postgres::Pool, config: Config) -> Self {
+        let oidc = config.oidc.clone().map(|c| Arc::new(oidc::Oidc::new(c)));
+        AppState {
+            pool,
+            config: Arc::new(config),
+            oidc,
+        }
+    }
+
     /// A pooled connection, mapped to a 503/500 API error on failure.
     pub async fn db(&self) -> error::ApiResult<deadpool_postgres::Object> {
         Ok(self.pool.get().await?)

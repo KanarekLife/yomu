@@ -92,18 +92,17 @@ async fn login(
     let client = state.db().await?;
     let row = client
         .query_opt(
-            "SELECT id, password_hash, is_admin, disabled FROM users WHERE username = $1",
+            "SELECT id, password_hash, disabled FROM users WHERE username = $1",
             &[&username],
         )
         .await?;
     let hash = row.as_ref().map(|r| r.get::<_, String>(1));
     let password_ok = auth::verify_password(req.password, hash).await;
     let row = match row {
-        Some(r) if password_ok && !r.get::<_, bool>(3) => r,
+        Some(r) if password_ok && !r.get::<_, bool>(2) => r,
         _ => return Err(ApiError::unauthorized("invalid username or password")),
     };
     let user_id: i64 = row.get(0);
-    let is_admin: bool = row.get(2);
     let device: String = {
         let d = req.device_name.trim();
         let d = if d.is_empty() { "unknown device" } else { d };
@@ -120,7 +119,6 @@ async fn login(
     Ok(Json(json!({
         "token": secret.token,
         "username": username,
-        "is_admin": is_admin,
     })))
 }
 
@@ -137,7 +135,7 @@ async fn logout(State(state): State<AppState>, user: AuthUser) -> ApiResult<Stat
 }
 
 async fn me(user: AuthUser) -> Json<serde_json::Value> {
-    Json(json!({ "username": user.username, "is_admin": user.is_admin }))
+    Json(json!({ "username": user.username }))
 }
 
 async fn sync_handler(

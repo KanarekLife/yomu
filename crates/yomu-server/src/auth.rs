@@ -31,6 +31,16 @@ pub fn hash_secret(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
+/// Constant-time equality of two secrets of any length (compares their
+/// SHA-256 digests, so the length doesn't leak either).
+pub fn secret_eq(a: &str, b: &str) -> bool {
+    let (x, y) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    x.iter()
+        .zip(y.iter())
+        .fold(0u8, |acc, (p, q)| acc | (p ^ q))
+        == 0
+}
+
 /// Usernames are case-insensitive; stored lowercase and trimmed.
 pub fn normalize_username(u: &str) -> String {
     u.trim().to_lowercase()
@@ -104,7 +114,6 @@ pub async fn verify_password(password: String, hash: Option<String>) -> bool {
 pub struct AuthUser {
     pub user_id: i64,
     pub username: String,
-    pub is_admin: bool,
     pub token_hash: Vec<u8>,
 }
 
@@ -130,7 +139,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 "UPDATE tokens t SET last_used_at = now()
                  FROM users u
                  WHERE t.token_hash = $1 AND u.id = t.user_id AND NOT u.disabled
-                 RETURNING u.id, u.username, u.is_admin",
+                 RETURNING u.id, u.username",
                 &[&token_hash],
             )
             .await?
@@ -138,7 +147,6 @@ impl FromRequestParts<AppState> for AuthUser {
         Ok(AuthUser {
             user_id: row.get(0),
             username: row.get(1),
-            is_admin: row.get(2),
             token_hash,
         })
     }
@@ -167,6 +175,14 @@ mod tests {
             hex::encode(hash_secret("abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn secret_comparison() {
+        assert!(secret_eq("hunter2", "hunter2"));
+        assert!(!secret_eq("hunter2", "hunter3"));
+        assert!(!secret_eq("hunter2", "hunter22"));
+        assert!(secret_eq("", ""));
     }
 
     #[test]

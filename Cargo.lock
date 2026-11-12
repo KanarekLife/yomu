@@ -6084,10 +6084,12 @@ version = "0.2.0"
 dependencies = [
  "argon2",
  "axum",
+ "base64 0.22.1",
  "deadpool-postgres",
  "hex",
  "http-body-util",
  "rand",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",
@@ -6099,6 +6101,8 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]

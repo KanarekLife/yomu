@@ -60,7 +60,19 @@ podman run -p 8080:8080 \
   ghcr.io/kanareklife/yomu-server:main
 ```
 
-Create accounts in `/admin`, then in the app open Settings → Sync → *Yomu server* and sign in.
+| Variable | |
+| --- | --- |
+| `DATABASE_URL` | PostgreSQL URL (required; `sslmode` honoured) |
+| `YOMU_LISTEN` | listen address, default `0.0.0.0:8080` |
+| `YOMU_MAX_FILE_MB` | EPUB upload limit, default `200` |
+| `YOMU_PUBLIC_URL` | external URL, e.g. `https://yomu.example.com` (needed for SSO) |
+| `YOMU_OIDC_ISSUER`, `YOMU_OIDC_CLIENT_ID`, `YOMU_OIDC_CLIENT_SECRET` | panel sign-in via OpenID Connect; redirect URI is `$YOMU_PUBLIC_URL/admin/oidc/callback` |
+| `YOMU_OIDC_ADMIN_GROUP` | optional: require this group in the `groups` claim |
+| `YOMU_ADMIN_USER`, `YOMU_ADMIN_PASSWORD` | local break-glass panel login |
+| `YOMU_ADMIN_LOCAL` | `true`/`false`; default `true` when a password is set |
+
+Panel admins are not app accounts and app accounts cannot open the panel.
+Create accounts in `/admin` (including one for yourself), then in the app open Settings → Sync → *Yomu server* and sign in.
 Without a server, choose *Folder* and point every device at a folder that Syncthing keeps in sync (ADR-0016).
 
 ## Development
