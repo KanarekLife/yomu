@@ -81,10 +81,12 @@
   .tr { font-size: 18px; line-height: 1.5; margin: 0 0 6px; }
   .literal { font-size: 14px; margin: 0 0 8px; font-style: italic; }
   .toggle { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: center; color: var(--accent); font-size: 13px; padding: 4px 0; }
-  .parts { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 2px; }
-  .parts li { display: grid; grid-template-columns: minmax(70px, max-content) 1fr; column-gap: 12px; padding: 6px 8px; border-radius: 8px; transition: background 120ms; }
+  /* One shared grid (rows use subgrid) so every meaning starts in the same column. */
+  .parts { list-style: none; padding: 0; margin: 8px 0; display: grid; grid-template-columns: minmax(4em, max-content) 1fr; row-gap: 2px; }
+  .parts li { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; column-gap: 14px; padding: 6px 8px; border-radius: 8px; transition: background 120ms; }
   .parts li:hover { background: var(--surface-2); }
-  .chunk { font-size: 17px; grid-row: span 2; align-self: center; }
+  .chunk { font-size: 17px; grid-column: 1; grid-row: 1 / span 2; align-self: center; }
+  .meaning, .role { grid-column: 2; }
   .reading { font-size: 11px; color: var(--muted); grid-column: 1; grid-row: 3; }
   .meaning { font-weight: 500; }
   .role { font-size: 12px; color: var(--muted); }

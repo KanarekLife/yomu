@@ -119,7 +119,7 @@
 </div>
 
 <style>
-  .scrim { position: fixed; inset: 0; background: #0004; z-index: 40; }
+  .scrim { position: fixed; inset: 0; background: #0000001a; z-index: 40; }
   .popup {
     position: fixed; z-index: 41; width: 420px; overflow-y: auto; padding: 14px 16px 16px;
     box-shadow: var(--shadow); font-size: 15px; overscroll-behavior: contain;

@@ -53,7 +53,11 @@
 
 <style>
   .sentence {
-    margin: 0;
+    /* Shrink-wrap and centre the block: short sentences sit in the middle of
+       the screen, long ones still wrap with natural left-aligned lines. */
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto;
     line-height: 2.1;
     text-align: start;
     word-break: normal;

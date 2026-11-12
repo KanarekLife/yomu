@@ -184,6 +184,7 @@
   // ---- input ---------------------------------------------------------------
   let tocOpen = $state(false);
   let optionsOpen = $state(false);
+  let vw = $state(window.innerWidth);
   let swiped = false;
   let sx = 0, sy = 0, tracking = false;
   function down(e: PointerEvent) {
@@ -267,7 +268,7 @@
   });
 </script>
 
-<svelte:window onkeydown={key} />
+<svelte:window onkeydown={key} bind:innerWidth={vw} />
 
 <header class="bar top">
   <button class="icon-btn" title="Library (Esc)" onclick={exit}><Icon name="back" /></button>
@@ -283,7 +284,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="content" onpointerdown={down} onpointerup={up} onpointercancel={() => (tracking = false)} onclick={closeLookup}>
+<div class="content" class:raised={(lookup || optionsOpen) && vw < 680} onpointerdown={down} onpointerup={up} onpointercancel={() => (tracking = false)} onclick={closeLookup}>
   <div class="inner" style="--fs:{app.settings.fontSize}px">
     {#if app.settings.showContext && prev && current}
       {#key pos}
@@ -406,9 +407,12 @@
     padding: 12px 20px; touch-action: pan-y;
   }
   .inner {
+    transition: transform 260ms var(--ease);
     width: 100%; max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px;
     font-family: var(--font-jp); font-size: var(--fs);
   }
+  /* Phone: a bottom sheet / options panel is open — lift the sentence so it stays visible. */
+  .content.raised .inner { transform: translateY(-27vh); }
   .context { font-size: 0.5em; color: var(--muted); opacity: 0.7; text-align: center; line-height: 1.6; }
   .stage { display: grid; min-height: 3em; align-items: center; }
   .slot { grid-area: 1 / 1; will-change: transform, opacity; }
