@@ -8,6 +8,7 @@
   import type { BookDetail, LookupResult, SentenceView, Token, Translation } from '../types';
   import Icon from './Icon.svelte';
   import Sentence from './Sentence.svelte';
+  import Illustration, { imageUrl, releaseImages } from './Illustration.svelte';
   import LookupPopup from './LookupPopup.svelte';
   import TranslationPanel from './TranslationPanel.svelte';
   import ReaderOptions from './ReaderOptions.svelte';
@@ -54,6 +55,10 @@
   $effect(() => {
     if (detail) ensure(pos);
   });
+  $effect(() => {
+    const n = cache.get(pos + 1);
+    if (n?.image && app.settings.showImages) imageUrl(bookId, n.image).catch(() => {});
+  });
 
   // ---- navigation ----------------------------------------------------------
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -73,6 +78,17 @@
   }
   const next = () => jump(pos + 1);
   const back = () => jump(pos - 1);
+
+  // Illustrations turned off: step over them in the direction of travel.
+  const hidden = (s: SentenceView | undefined) => !!s?.image && !app.settings.showImages;
+  $effect(() => {
+    if (!hidden(current)) return;
+    untrack(() => {
+      const t = pos + dir;
+      if (t >= 0 && t < total) jump(t);
+      else if (pos - dir >= 0 && pos - dir < total) jump(pos - dir);
+    });
+  });
 
   function slide(node: Element, { d, out = false }: { d: number; out?: boolean }) {
     return {
@@ -129,6 +145,7 @@
   let trTimer: ReturnType<typeof setTimeout> | undefined;
 
   async function translate(idx: number, force = false): Promise<void> {
+    if (cache.get(idx)?.image) return;
     const existing = translations.get(idx);
     if (!force && existing && existing.status !== 'error') return;
     translations.set(idx, { status: 'loading' });
@@ -141,7 +158,8 @@
   }
   $effect(() => {
     const p = pos;
-    if (!app.settings.translation || !detail) return;
+    const c = current;
+    if (!app.settings.translation || !detail || !c || c.image) return;
     untrack(() => scheduleTranslation(p));
   });
   function scheduleTranslation(p: number) {
@@ -264,6 +282,7 @@
   onDestroy(() => {
     clearTimeout(saveTimer);
     clearTimeout(trTimer);
+    releaseImages();
     if (detail) api.setPosition(bookId, pos).catch(() => {});
   });
 </script>
@@ -286,23 +305,27 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="content" class:raised={(lookup || optionsOpen) && vw < 680} onpointerdown={down} onpointerup={up} onpointercancel={() => (tracking = false)} onclick={closeLookup}>
   <div class="inner" style="--fs:{app.settings.fontSize}px">
-    {#if app.settings.showContext && prev && current}
+    {#if app.settings.showContext && prev?.text && current && !current.image}
       {#key pos}
         <div class="context jp" in:fade={{ duration: 200 }}>{prev.text}</div>
       {/key}
     {/if}
     <div class="stage">
-      {#if current}
+      {#if current && !hidden(current)}
         {#key pos}
           <div class="slot" in:slide={{ d: dir }} out:slide={{ d: dir, out: true }}>
-            <Sentence sentence={current} furigana={app.settings.furigana} {highlight} {soft} onpick={pick} />
+            {#if current.image}
+              <Illustration {bookId} path={current.image} />
+            {:else}
+              <Sentence sentence={current} furigana={app.settings.furigana} {highlight} {soft} onpick={pick} />
+            {/if}
           </div>
         {/key}
       {:else if detail}
         <div class="slot loading muted" in:fade={{ duration: 300, delay: 150 }}>…</div>
       {/if}
     </div>
-    {#if app.settings.translation && current}
+    {#if app.settings.translation && current && !current.image}
       <TranslationPanel
         state={translations.get(pos)}
         bind:showBreakdown={app.settings.showBreakdown}
@@ -378,7 +401,7 @@
     </div>
     {#if detail.outdated}
       <div class="outdated">
-        <p>This book was imported by an older version, so in-text chapters aren't detected yet.</p>
+        <p>This book was imported by an older version, so in-text chapters and illustrations aren't shown yet.</p>
         <button class="btn" onclick={reimport}>Import the EPUB again</button>
       </div>
     {/if}

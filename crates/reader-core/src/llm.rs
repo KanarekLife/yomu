@@ -134,11 +134,7 @@ fn endpoint(base: &str, path: &str) -> String {
 }
 
 fn client(cfg: &LlmConfig) -> Result<reqwest::Client> {
-    static PROVIDER: std::sync::Once = std::sync::Once::new();
-    PROVIDER.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-    reqwest::Client::builder()
+    crate::http_client()
         .timeout(std::time::Duration::from_secs(cfg.timeout_secs.max(5)))
         .build()
         .map_err(|e| Error::Llm(e.to_string()))

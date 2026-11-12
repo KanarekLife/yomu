@@ -13,6 +13,27 @@ pub mod nlp;
 pub mod segment;
 pub mod text;
 
+/// HTTP client builder shared by the LLM client and dictionary downloads.
+///
+/// Desktop: the OS certificate verifier (respects system/corporate CAs).
+/// Android: the platform verifier needs JNI initialisation from Kotlin that
+/// Tauri doesn't do, and every HTTPS request failed, so use Mozilla's roots.
+pub(crate) fn http_client() -> reqwest::ClientBuilder {
+    static PROVIDER: std::sync::Once = std::sync::Once::new();
+    PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    #[cfg(target_os = "android")]
+    {
+        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+        let mut tls = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        reqwest::Client::builder().tls_backend_preconfigured(tls)
+    }
+    #[cfg(not(target_os = "android"))]
+    reqwest::Client::builder()
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -74,6 +95,7 @@ CREATE TABLE IF NOT EXISTS sentences (
     paragraph_start INTEGER NOT NULL,
     text            TEXT NOT NULL,
     ruby            TEXT,
+    image           TEXT,
     PRIMARY KEY (book_id, idx)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS translations (
@@ -145,6 +167,8 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
 pub struct Core {
     db_path: PathBuf,
     conn: Mutex<Connection>,
+    /// Last EPUB read for illustrations, so paging through them is cheap.
+    epub_cache: Mutex<Option<(i64, std::sync::Arc<Vec<u8>>)>>,
 }
 
 impl Core {
@@ -175,9 +199,15 @@ impl Core {
                  ALTER TABLE books ADD COLUMN import_version INTEGER NOT NULL DEFAULT 1;",
             )?;
         }
+        // v0.1.3: illustrations are steps of their own (path inside the EPUB).
+        let has_image: bool =
+            conn.prepare("SELECT 1 FROM pragma_table_info('sentences') WHERE name = 'image'")?.exists([])?;
+        if !has_image {
+            conn.execute_batch("ALTER TABLE sentences ADD COLUMN image TEXT")?;
+        }
         // Remove dictionaries whose import was interrupted.
         conn.execute("DELETE FROM dictionaries WHERE complete = 0", [])?;
-        Ok(Core { db_path, conn: Mutex::new(conn) })
+        Ok(Core { db_path, conn: Mutex::new(conn), epub_cache: Mutex::new(None) })
     }
 
     pub(crate) fn db(&self) -> MutexGuard<'_, Connection> {

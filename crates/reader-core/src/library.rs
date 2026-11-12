@@ -9,7 +9,8 @@ use crate::segment::{is_heading, split_sentences, RubySpan};
 
 /// Bump when segmentation/chapter detection changes; re-importing a book
 /// made by an older importer rebuilds it in place (keeping the position).
-pub const IMPORT_VERSION: i64 = 2;
+/// 3: illustrations are stored as steps (`sentences.image`).
+pub const IMPORT_VERSION: i64 = 3;
 use crate::{now, Core, Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +51,8 @@ pub struct SentenceView {
     pub paragraph_start: bool,
     pub text: String,
     pub tokens: Vec<Token>,
+    /// Illustration step: path of the image inside the EPUB (`text` is empty).
+    pub image: Option<String>,
 }
 
 fn fnv1a(bytes: &[u8]) -> String {
@@ -96,8 +99,14 @@ impl Core {
             if version >= IMPORT_VERSION {
                 return self.book_summary(id);
             }
-            // Outdated import: rebuild it, keeping the reading position.
-            keep_position = Some(position);
+            // Outdated import: rebuild it, keeping the reading position
+            // (as a count of text sentences before it).
+            let images_before: i64 = self.db().query_row(
+                "SELECT COUNT(*) FROM sentences WHERE book_id = ?1 AND idx < ?2 AND image IS NOT NULL",
+                params![id, position],
+                |r| r.get(0),
+            )?;
+            keep_position = Some(position - images_before);
             self.delete_book(id)?;
         }
         let book = parse_epub(bytes.clone())?;
@@ -121,12 +130,22 @@ impl Core {
             let mut ins_ch =
                 tx.prepare("INSERT INTO chapters(book_id, idx, title, start_sentence, level) VALUES (?1,?2,?3,?4,?5)")?;
             let mut ins_s = tx.prepare(
-                "INSERT INTO sentences(book_id, idx, chapter_idx, paragraph_start, text, ruby) VALUES (?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO sentences(book_id, idx, chapter_idx, paragraph_start, text, ruby, image) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             )?;
             let mut ch_idx: i64 = -1;
             for ch in &book.chapters {
                 let mut toc_pending = true;
                 for p in &ch.paragraphs {
+                    if let Some(img) = &p.image {
+                        if toc_pending {
+                            ch_idx += 1;
+                            ins_ch.execute(params![book_id, ch_idx, ch.title, idx, 0])?;
+                            toc_pending = false;
+                        }
+                        ins_s.execute(params![book_id, idx, ch_idx.max(0), true, "", None::<String>, img])?;
+                        idx += 1;
+                        continue;
+                    }
                     let heading = is_heading(p);
                     let text = p.text.trim_matches(|c: char| c.is_whitespace() || c == '\u{3000}');
                     if toc_pending {
@@ -140,7 +159,7 @@ impl Core {
                     }
                     for s in split_sentences(p) {
                         let ruby = if s.ruby.is_empty() { None } else { Some(serde_json::to_string(&s.ruby)?) };
-                        ins_s.execute(params![book_id, idx, ch_idx, s.paragraph_start, s.text, ruby])?;
+                        ins_s.execute(params![book_id, idx, ch_idx, s.paragraph_start, s.text, ruby, None::<String>])?;
                         idx += 1;
                     }
                 }
@@ -148,6 +167,20 @@ impl Core {
         }
         if idx == 0 {
             return Err(Error::Epub("the book contains no readable text".into()));
+        }
+        if let Some(p) = keep_position {
+            // Older imports had no illustration steps: the saved position counts
+            // text sentences only, so find the same sentence among the new steps.
+            let new: Option<i64> = tx
+                .query_row(
+                    "SELECT idx FROM sentences WHERE book_id = ?1 AND image IS NULL ORDER BY idx LIMIT 1 OFFSET ?2",
+                    params![book_id, p],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(new) = new {
+                tx.execute("UPDATE books SET position = ?1 WHERE id = ?2", params![new, book_id])?;
+            }
         }
         tx.execute(
             "UPDATE books SET sentence_count = ?1, position = MIN(position, ?1 - 1) WHERE id = ?2",
@@ -211,7 +244,37 @@ impl Core {
             .and_then(|(b, m)| b.map(|b| (b, m.unwrap_or_else(|| "image/jpeg".into())))))
     }
 
+    /// An illustration from the book's stored EPUB, with its MIME type.
+    pub fn book_image(&self, id: i64, path: &str) -> Result<(Vec<u8>, String)> {
+        let epub = {
+            let mut cache = self.epub_cache.lock().unwrap_or_else(|p| p.into_inner());
+            match cache.as_ref() {
+                Some((cid, b)) if *cid == id => b.clone(),
+                _ => {
+                    let b: Option<Vec<u8>> =
+                        self.db().query_row("SELECT epub FROM books WHERE id = ?1", [id], |r| r.get(0)).optional()?.flatten();
+                    let b = std::sync::Arc::new(b.ok_or_else(|| Error::NotFound(format!("book {id} has no stored EPUB")))?);
+                    *cache = Some((id, b.clone()));
+                    b
+                }
+            }
+        };
+        let bytes = crate::epub::read_entry(&epub, path)
+            .ok_or_else(|| Error::NotFound(format!("image {path} not found in the EPUB")))?;
+        let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "avif" => "image/avif",
+            _ => "image/jpeg",
+        };
+        Ok((bytes, mime.into()))
+    }
+
     pub fn delete_book(&self, id: i64) -> Result<()> {
+        *self.epub_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
         self.db().execute("DELETE FROM books WHERE id = ?1", [id])?;
         Ok(())
     }
@@ -228,7 +291,7 @@ impl Core {
     pub fn sentence_texts(&self, book_id: i64, from: i64, count: i64) -> Result<Vec<String>> {
         let db = self.db();
         let mut st = db.prepare_cached(
-            "SELECT text FROM sentences WHERE book_id = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx",
+            "SELECT text FROM sentences WHERE book_id = ?1 AND idx >= ?2 AND idx < ?3 AND image IS NULL ORDER BY idx",
         )?;
         let rows = st
             .query_map(params![book_id, from, from + count], |r| r.get::<_, String>(0))?
@@ -238,25 +301,25 @@ impl Core {
 
     /// Sentences in `[from, from+count)`, tokenised and with furigana.
     pub fn sentences(&self, book_id: i64, from: i64, count: i64) -> Result<Vec<SentenceView>> {
-        let raw: Vec<(i64, i64, bool, String, Option<String>)> = {
+        let raw: Vec<(i64, i64, bool, String, Option<String>, Option<String>)> = {
             let db = self.db();
             let mut st = db.prepare_cached(
-                "SELECT idx, chapter_idx, paragraph_start, text, ruby FROM sentences
+                "SELECT idx, chapter_idx, paragraph_start, text, ruby, image FROM sentences
                  WHERE book_id = ?1 AND idx >= ?2 AND idx < ?3 ORDER BY idx",
             )?;
             let rows = st
                 .query_map(params![book_id, from.max(0), from + count], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
         let analyzer = Analyzer::global()?;
         raw.into_iter()
-            .map(|(idx, chapter, paragraph_start, text, ruby)| {
+            .map(|(idx, chapter, paragraph_start, text, ruby, image)| {
                 let hints: Vec<RubySpan> = ruby.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
-                let tokens = analyzer.analyze(&text, &hints)?;
-                Ok(SentenceView { idx, chapter, paragraph_start, text, tokens })
+                let tokens = if image.is_some() { Vec::new() } else { analyzer.analyze(&text, &hints)? };
+                Ok(SentenceView { idx, chapter, paragraph_start, text, tokens, image })
             })
             .collect()
     }
@@ -314,5 +377,36 @@ mod tests {
         assert_eq!((b2.position, b2.sentence_count, b2.outdated), (3, 6, false));
         core.delete_book(b2.id).unwrap();
         assert!(core.list_books().unwrap().is_empty());
+    }
+
+    #[test]
+    fn illustrations_are_steps() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let o = zip::write::SimpleFileOptions::default();
+            let mut put = |n: &str, b: &[u8]| {
+                z.start_file(n, o).unwrap();
+                z.write_all(b).unwrap();
+            };
+            put("META-INF/container.xml", br#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="o/c.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#);
+            put("o/c.opf", r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>絵</dc:title></metadata><manifest><item id="a" href="t/a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>"#.as_bytes());
+            put("o/t/a.xhtml", "<html><body><p>一。二。</p><p><img src=\"../i/p.PNG\"/></p><p>三。</p></body></html>".as_bytes());
+            put("o/i/p.PNG", b"\x89PNG fake");
+            z.finish().unwrap();
+        }
+        let (core, _d) = test_core();
+        let b = core.import_epub(buf.into_inner()).unwrap();
+        let s = core.sentences(b.id, 0, 10).unwrap();
+        let shape: Vec<(&str, Option<&str>)> = s.iter().map(|s| (s.text.as_str(), s.image.as_deref())).collect();
+        assert_eq!(shape, vec![("一。", None), ("二。", None), ("", Some("o/i/p.PNG")), ("三。", None)]);
+        assert_eq!(core.book_image(b.id, "o/i/p.PNG").unwrap(), (b"\x89PNG fake".to_vec(), "image/png".into()));
+        // Translation context skips the picture.
+        assert_eq!(core.sentence_texts(b.id, 0, 4).unwrap(), vec!["一。", "二。", "三。"]);
+        // Upgrading keeps the reader on the same sentence.
+        core.db().execute("UPDATE books SET import_version = 2, position = 3", []).unwrap();
+        core.upgrade_books().unwrap();
+        let b2 = core.list_books().unwrap().pop().unwrap();
+        assert_eq!(core.sentences(b2.id, b2.position, 1).unwrap()[0].text, "三。");
     }
 }

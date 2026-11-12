@@ -5,6 +5,11 @@
   import { app, LLM_PRESETS } from '../state.svelte';
   import type { DictionaryInfo, Theme } from '../types';
   import Icon from './Icon.svelte';
+  import { getVersion } from '@tauri-apps/api/app';
+
+  // From tauri.conf.json, so it always matches the release.
+  let version = $state('');
+  getVersion().then((v) => (version = v), () => {});
   import DictionarySetup from './DictionarySetup.svelte';
 
   const s = app.settings;
@@ -249,7 +254,7 @@
     </section>
 
     <section class="about muted small">
-      <p><b>Yomu</b> 0.1.1 · Tokenizer: lindera + IPADIC · Dictionaries: Yomitan format</p>
+      <p><b>Yomu</b> {version} · Tokenizer: lindera + IPADIC · Dictionaries: Yomitan format</p>
     </section>
   </div>
 </div>

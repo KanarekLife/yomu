@@ -17,6 +17,8 @@ pub struct Paragraph {
     pub ruby: Vec<RubySpan>,
     /// Came from an `<h1>`–`<h6>` element.
     pub heading: bool,
+    /// An illustration (path inside the EPUB) instead of text.
+    pub image: Option<String>,
 }
 
 /// Whether a paragraph looks like an in-text chapter heading: an HTML
@@ -150,7 +152,7 @@ mod tests {
     use super::*;
 
     fn texts(s: &str) -> Vec<String> {
-        split_sentences(&Paragraph { text: s.into(), ruby: vec![], heading: false }).into_iter().map(|s| s.text).collect()
+        split_sentences(&Paragraph { text: s.into(), ruby: vec![], ..Default::default() }).into_iter().map(|s| s.text).collect()
     }
 
     #[test]
@@ -197,7 +199,7 @@ mod tests {
         let p = Paragraph {
             text: "あ。私、小柳です。".into(),
             ruby: vec![RubySpan { start: 4, end: 6, reading: "こやなぎ".into() }],
-            heading: false,
+            ..Default::default()
         };
         let s = split_sentences(&p);
         assert_eq!(s.len(), 2);

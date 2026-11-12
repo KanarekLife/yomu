@@ -55,6 +55,22 @@ impl Archive {
     }
 }
 
+/// Read one file from an EPUB (case-insensitive fallback).
+pub fn read_entry(epub: &[u8], path: &str) -> Option<Vec<u8>> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(epub)).ok()?;
+    let name = match zip.index_for_name(path) {
+        Some(_) => path.to_string(),
+        None => {
+            let lower = path.to_lowercase();
+            zip.file_names().filter_map(|n| n.ok()).find(|n| n.to_lowercase() == lower)?.into_owned()
+        }
+    };
+    let mut f = zip.by_name(&name).ok()?;
+    let mut buf = Vec::with_capacity(f.size() as usize);
+    f.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -225,7 +241,7 @@ pub fn parse_epub(bytes: Vec<u8>) -> Result<ParsedBook> {
         }
         let Some(raw) = ar.read_any(&item.href) else { continue };
         let html = String::from_utf8_lossy(&raw);
-        let (paras, heading) = extract_paragraphs(&html);
+        let (paras, heading) = extract_paragraphs(&html, &dir_of(&item.href));
         let toc_title = toc_map.get(&item.href).cloned();
         match (toc_title, chapters.last_mut()) {
             // Start a new chapter when the TOC points here, or when there is no
@@ -300,7 +316,8 @@ const BLOCKS: &[&str] = &[
 ];
 const SKIP: &[&str] = &["rt", "rp", "script", "style", "head", "title", "svg", "math", "nav"];
 
-struct Collector {
+struct Collector<'b> {
+    base: &'b str,
     in_heading: bool,
     paras: Vec<Paragraph>,
     cur: Paragraph,
@@ -308,7 +325,7 @@ struct Collector {
     heading: Option<String>,
 }
 
-impl Collector {
+impl Collector<'_> {
     fn push_text(&mut self, s: &str) {
         for c in s.chars() {
             if matches!(c, '\n' | '\r' | '\t') {
@@ -327,6 +344,25 @@ impl Collector {
         }
         self.cur_len = 0;
     }
+    /// An illustration becomes a paragraph of its own.
+    fn image(&mut self, href: &str) {
+        let href = href.trim();
+        if href.is_empty() || href.starts_with("data:") || href.contains("://") {
+            return;
+        }
+        self.flush();
+        let path = resolve(self.base, href);
+        // The same picture twice in a row (e.g. <svg> with an <img> fallback).
+        if self.paras.last().is_some_and(|p| p.image.as_deref() == Some(path.as_str())) {
+            return;
+        }
+        self.paras.push(Paragraph { image: Some(path), ..Default::default() });
+    }
+}
+
+/// `<img>` that stands for a single character (外字) rather than an illustration.
+fn is_gaiji(e: &scraper::node::Element) -> bool {
+    e.attr("class").is_some_and(|c| c.to_lowercase().contains("gaiji"))
 }
 
 fn text_excluding(el: ElementRef, exclude: &[&str]) -> String {
@@ -359,12 +395,32 @@ fn rt_text(el: ElementRef) -> String {
     s.trim().to_string()
 }
 
-fn walk(el: ElementRef, c: &mut Collector) {
+fn walk(el: ElementRef, c: &mut Collector<'_>) {
     for child in el.children() {
         match child.value() {
             Node::Text(t) => c.push_text(t),
             Node::Element(e) => {
                 let name = e.name();
+                if name == "img" && !is_gaiji(e) {
+                    if let Some(src) = e.attr("src") {
+                        c.image(src);
+                    }
+                    continue;
+                }
+                if name == "svg" {
+                    // Full-page illustrations are often <svg><image xlink:href=…/></svg>.
+                    for d in child.descendants() {
+                        if let Node::Element(img) = d.value() {
+                            if img.name() == "image" {
+                                // `xlink:href` is namespaced, so match the local name.
+                                if let Some((_, h)) = img.attrs().find(|(k, _)| *k == "href") {
+                                    c.image(h);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if SKIP.contains(&name) {
                     continue;
                 }
@@ -405,11 +461,12 @@ fn walk(el: ElementRef, c: &mut Collector) {
 }
 
 /// Returns the paragraphs of a content document, plus its first heading.
-pub fn extract_paragraphs(html: &str) -> (Vec<Paragraph>, Option<String>) {
+/// `base` is the document's directory inside the EPUB, for image paths.
+pub fn extract_paragraphs(html: &str, base: &str) -> (Vec<Paragraph>, Option<String>) {
     let doc = Html::parse_document(html);
     let body_sel = scraper::Selector::parse("body").unwrap();
     let root = doc.select(&body_sel).next().unwrap_or_else(|| doc.root_element());
-    let mut c = Collector { in_heading: false, paras: Vec::new(), cur: Paragraph::default(), cur_len: 0, heading: None };
+    let mut c = Collector { base, in_heading: false, paras: Vec::new(), cur: Paragraph::default(), cur_len: 0, heading: None };
     walk(root, &mut c);
     c.flush();
     (c.paras, c.heading)
@@ -430,7 +487,7 @@ mod tests {
     fn paragraphs_and_ruby() {
         let html = r#"<html><body><div><p class="x">　私、<ruby>小<rp>(</rp><rt>こ</rt><rp>)</rp></ruby><ruby>柳<rt>やなぎ</rt></ruby>は</p>
             <p>　</p><p>二行目<br/>三行目</p></div></body></html>"#;
-        let (p, _) = extract_paragraphs(html);
+        let (p, _) = extract_paragraphs(html, "");
         assert_eq!(p.len(), 3);
         assert_eq!(p[0].text, "　私、小柳は");
         assert_eq!(
@@ -442,5 +499,18 @@ mod tests {
         );
         assert_eq!(p[1].text, "二行目");
         assert_eq!(p[2].text, "三行目");
+    }
+
+    #[test]
+    fn illustrations() {
+        let html = r#"<html><body><p>前。</p>
+            <div class="p-image"><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="../image/i-001.jpg"/></svg></div>
+            <p>字<img class="gaiji" src="../image/g.png"/>後。</p><p><img src="../image/i-002.jpg" alt=""/></p></body></html>"#;
+        let (p, _) = extract_paragraphs(html, "OEBPS/text");
+        let shape: Vec<(&str, Option<&str>)> = p.iter().map(|p| (p.text.as_str(), p.image.as_deref())).collect();
+        assert_eq!(
+            shape,
+            vec![("前。", None), ("", Some("OEBPS/image/i-001.jpg")), ("字後。", None), ("", Some("OEBPS/image/i-002.jpg"))]
+        );
     }
 }

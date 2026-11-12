@@ -16,5 +16,6 @@
 | [0012](0012-reading-options-in-reader.md) | Reading options live in the reader | accepted |
 | [0013](0013-pnpm-and-safe-chain.md) | pnpm with Aikido Safe Chain | accepted |
 | [0014](0014-ci-speed.md) | Fast CI: warm caches on main, build only what ships | accepted |
+| [0015](0015-illustrations.md) | Illustrations are steps in the sentence sequence | accepted |
 
 New decision: copy `0000-template.md` to the next number.

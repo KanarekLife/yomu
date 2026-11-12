@@ -19,6 +19,13 @@ export const api = {
     if (!buf || buf.byteLength === 0) return null;
     return URL.createObjectURL(new Blob([buf]));
   },
+  /** Object URL for an illustration inside the book's EPUB. */
+  bookImage: async (id: number, path: string): Promise<string> => {
+    const buf = new Uint8Array(await invoke<ArrayBuffer>('book_image', { id, path }));
+    const nl = buf.indexOf(10);
+    const type = new TextDecoder().decode(buf.subarray(0, nl));
+    return URL.createObjectURL(new Blob([buf.subarray(nl + 1)], { type }));
+  },
   deleteBook: (id: number) => invoke<void>('delete_book', { id }),
   importBook: () => invoke<BookSummary | null>('import_book'),
   importBookPath: (path: string) => invoke<BookSummary>('import_book_path', { path }),

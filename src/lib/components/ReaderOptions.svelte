@@ -18,12 +18,13 @@
     s.fontSize = Math.max(16, Math.min(60, s.fontSize + d));
     save();
   };
-  const toggles: { key: 'furigana' | 'translation' | 'showBreakdown' | 'prefetchTranslation' | 'showContext'; label: string; hint?: string }[] = [
+  const toggles: { key: 'furigana' | 'translation' | 'showBreakdown' | 'prefetchTranslation' | 'showContext' | 'showImages'; label: string; hint?: string }[] = [
     { key: 'furigana', label: 'Furigana', hint: 'F' },
     { key: 'translation', label: 'Translation', hint: 'T' },
     { key: 'showBreakdown', label: 'Expand sentence breakdown' },
     { key: 'prefetchTranslation', label: 'Pre-translate next sentence' },
     { key: 'showContext', label: 'Show previous sentence' },
+    { key: 'showImages', label: 'Show illustrations' },
   ];
 </script>
 

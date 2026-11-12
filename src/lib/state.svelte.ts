@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS: Settings = {
   prefetchTranslation: true,
   showBreakdown: true,
   showContext: false,
+  showImages: true,
   llm: DEFAULT_LLM,
 };
 

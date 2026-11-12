@@ -12,6 +12,13 @@ fn main() {
     for c in core.book_detail(b.id).unwrap().chapters {
         println!("  chapter {} “{}” @ {}", c.idx, c.title, c.start);
     }
+    let all = core.sentences(b.id, 0, b.sentence_count).unwrap();
+    let images: Vec<_> = all.iter().filter_map(|s| s.image.as_ref().map(|i| (s.idx, i))).collect();
+    println!("{} illustrations", images.len());
+    for (idx, path) in &images {
+        let n = core.book_image(b.id, path).map(|(b, m)| format!("{} bytes, {m}", b.len())).unwrap_or_else(|e| e.to_string());
+        println!("  #{idx} {path} ({n})");
+    }
     let t = std::time::Instant::now();
     let s = core.sentences(b.id, 0, count).unwrap();
     println!("analysed {} sentences in {:?}", s.len(), t.elapsed());
@@ -20,7 +27,10 @@ fn main() {
             Some(r) => format!("{}[{}]", g.text, r),
             None => g.text.clone(),
         }).collect();
-        println!("{:>4} {}", s.idx, furi);
+        match &s.image {
+            Some(i) => println!("{:>4} [illustration {i}]", s.idx),
+            None => println!("{:>4} {}", s.idx, furi),
+        }
     }
     let _ = std::fs::remove_dir_all(dir);
 }

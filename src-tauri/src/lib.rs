@@ -61,6 +61,17 @@ async fn book_cover(core: CoreState<'_>, id: i64) -> Res<tauri::ipc::Response> {
 }
 
 #[tauri::command]
+async fn book_image(core: CoreState<'_>, id: i64, path: String) -> Res<tauri::ipc::Response> {
+    let (bytes, mime) = blocking(&core, move |c| c.book_image(id, &path)).await?;
+    // MIME type first (one line), then the image bytes.
+    let mut out = Vec::with_capacity(mime.len() + 1 + bytes.len());
+    out.extend_from_slice(mime.as_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(&bytes);
+    Ok(tauri::ipc::Response::new(out))
+}
+
+#[tauri::command]
 async fn delete_book(core: CoreState<'_>, id: i64) -> Res<()> {
     blocking(&core, move |c| c.delete_book(id)).await
 }
@@ -253,6 +264,7 @@ pub fn run() {
             list_books,
             book_detail,
             book_cover,
+            book_image,
             delete_book,
             import_book,
             import_book_path,

@@ -80,11 +80,7 @@ pub const CATALOG: &[CatalogEntry] = &[
 
 /// Download `url` to `dest`, calling `progress(done, total)`.
 pub async fn download(url: &str, dest: &Path, mut progress: impl FnMut(u64, u64)) -> Result<()> {
-    static PROVIDER: std::sync::Once = std::sync::Once::new();
-    PROVIDER.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-    let client = reqwest::Client::builder()
+    let client = crate::http_client()
         .user_agent("Yomu/0.1")
         .connect_timeout(std::time::Duration::from_secs(20))
         .build()

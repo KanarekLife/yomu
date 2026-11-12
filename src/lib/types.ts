@@ -23,6 +23,8 @@ export interface SentenceView {
   paragraph_start: boolean;
   text: string;
   tokens: Token[];
+  /** Illustration step: path of the image inside the EPUB (`text` is empty). */
+  image: string | null;
 }
 
 export interface BookSummary {
@@ -141,5 +143,6 @@ export interface Settings {
   prefetchTranslation: boolean;
   showBreakdown: boolean;
   showContext: boolean;
+  showImages: boolean;
   llm: LlmConfig;
 }
