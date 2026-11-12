@@ -96,9 +96,17 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then echo "::warning::No signing secrets; APK will be unsigned"; exit 0; fi
           cd src-tauri/gen/android
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            # No secrets: sign with a throwaway key so the APK is installable.
+            # Updating to a build signed with a different key needs an uninstall first.
+            echo "::warning::ANDROID_KEYSTORE_BASE64 not set; signing with a temporary key"
+            ANDROID_KEY_ALIAS=yomu; ANDROID_KEY_PASSWORD=$(openssl rand -hex 16)
+            keytool -genkeypair -keystore "$RUNNER_TEMP/release.jks" -storetype JKS -keyalg RSA -keysize 2048 \
+              -validity 10000 -alias yomu -storepass "$ANDROID_KEY_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" -dname "CN=Yomu"
+          else
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          fi
           printf 'keyAlias=%s\npassword=%s\nstoreFile=%s\n' "$ANDROID_KEY_ALIAS" "$ANDROID_KEY_PASSWORD" "$RUNNER_TEMP/release.jks" > keystore.properties
       - run: npx tauri android build --apk --aab
       - name: Collect packages
