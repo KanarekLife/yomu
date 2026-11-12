@@ -821,6 +821,50 @@ mod tests {
         send(&a.sync_logout());
     }
 
+    /// Against a running yomu-server: `YOMU_TEST_SERVER=http://host:port|user|password`.
+    #[test]
+    fn server_sync_between_two_devices() {
+        let Ok(spec) = std::env::var("YOMU_TEST_SERVER") else { return };
+        let mut it = spec.split('|');
+        let (url, user, pw) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (a, _da) = test_core();
+        let (b, _db) = test_core();
+        rt.block_on(a.sync_login(url, user, pw, "A")).unwrap();
+        rt.block_on(b.sync_login(url, user, pw, "B")).unwrap();
+
+        let book = a.import_epub(epub()).unwrap();
+        a.set_position(book.id, 3).unwrap();
+        a.db()
+            .execute("INSERT INTO translations(book_id, idx, lang, text, model, updated_at) VALUES (?1, 2, 'English', '{}', 'm', 7)", [book.id])
+            .unwrap();
+        a.set_settings(&serde_json::json!({ "theme": "sepia", "llm": { "api_key": "sk-test" } })).unwrap();
+        let r = rt.block_on(a.sync_now()).unwrap();
+        assert_eq!(r.files_uploaded, 1);
+
+        let r = rt.block_on(b.sync_now()).unwrap();
+        assert_eq!((r.books_added, r.files_downloaded, r.settings_changed), (1, 1, true));
+        let bb = b.list_books().unwrap().pop().unwrap();
+        assert_eq!(bb.position, 3);
+        assert_eq!(b.get_settings().unwrap()["llm"]["api_key"], "sk-test");
+        let n: i64 = b.db().query_row("SELECT COUNT(*) FROM translations", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        b.set_position(bb.id, 5).unwrap();
+        rt.block_on(b.sync_now()).unwrap();
+        rt.block_on(a.sync_now()).unwrap();
+        assert_eq!(a.book_summary(book.id).unwrap().position, 5);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        b.delete_book(bb.id).unwrap();
+        rt.block_on(b.sync_now()).unwrap();
+        let r = rt.block_on(a.sync_now()).unwrap();
+        assert_eq!(r.books_deleted, 1);
+        rt.block_on(a.sync_logout()).unwrap();
+        assert!(!a.sync_status().signed_in);
+    }
+
     #[test]
     fn last_writer_wins() {
         let (a, _d) = test_core();
