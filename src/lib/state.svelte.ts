@@ -53,6 +53,10 @@ class AppState {
   syncing = $state(false);
   #saveTimer: ReturnType<typeof setTimeout> | undefined;
   #syncTimer: ReturnType<typeof setTimeout> | undefined;
+  #syncRun: Promise<SyncReport | null> | null = null;
+  #syncQueued: Promise<SyncReport | null> | null = null;
+  /** Saves pending local changes (the reader's position) before a sync. */
+  #flush: (() => Promise<unknown>) | null = null;
   #toastId = 0;
 
   async #readSettings() {
@@ -78,9 +82,19 @@ class AppState {
       this.runSync();
     }).catch(() => {});
     setInterval(() => this.runSync(), 5 * 60_000);
+    // Backgrounding is the closest Android gets to "closing the app".
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') this.runSync();
       else this.requestSync(1000);
+    });
+    // Desktop: the window's close button waits for this (src-tauri on_window_event).
+    listen('app-closing', async () => {
+      try {
+        await this.#flush?.();
+        await Promise.race([this.runSync(), new Promise((r) => setTimeout(r, 8000))]);
+      } finally {
+        api.exitApp();
+      }
     });
     listen<ImportProgress>('dict-import-progress', (e) => {
       if (this.dictJob) this.dictJob.progress = e.payload;
@@ -160,14 +174,42 @@ class AppState {
     this.#syncTimer = setTimeout(() => this.runSync(), delay);
   }
 
-  /** One sync now. `manual` shows the outcome; background syncs stay quiet. */
-  async runSync(manual = false): Promise<SyncReport | null> {
-    if (!this.sync || this.sync.mode === 'off' || this.syncing) return null;
-    if (this.sync.mode === 'server' && !this.sync.signed_in) return null;
+  /** Register what to save before each sync; returns the unregister function. */
+  onBeforeSync(f: () => Promise<unknown>) {
+    this.#flush = f;
+    return () => {
+      if (this.#flush === f) this.#flush = null;
+    };
+  }
+
+  get #canSync() {
+    return !!this.sync && this.sync.mode !== 'off' && (this.sync.mode !== 'server' || this.sync.signed_in);
+  }
+
+  /** One sync now. `manual` shows the outcome; background syncs stay quiet.
+   *  Asked while a sync runs, it runs once more afterwards, so no change waits for the next trigger. */
+  runSync(manual = false): Promise<SyncReport | null> {
+    if (!this.#canSync) return Promise.resolve(null);
     clearTimeout(this.#syncTimer);
+    if (this.#syncRun) {
+      return (this.#syncQueued ??= this.#syncRun.then(() => {
+        this.#syncQueued = null;
+        return this.runSync(manual);
+      }));
+    }
+    const run = this.#doSync(manual);
+    this.#syncRun = run;
+    run.finally(() => {
+      if (this.#syncRun === run) this.#syncRun = null;
+    });
+    return run;
+  }
+
+  async #doSync(manual: boolean): Promise<SyncReport | null> {
     this.syncing = true;
     let rep: SyncReport | null = null;
     try {
+      await this.#flush?.().catch(() => {});
       rep = await api.syncNow();
       if (manual && rep) this.toast(describeSync(rep));
     } catch (e) {

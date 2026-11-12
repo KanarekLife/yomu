@@ -191,6 +191,39 @@ async fn sync_logout(core: CoreState<'_>) -> Res<SyncStatus> {
     core.sync_logout().await.map_err(err)
 }
 
+#[tauri::command]
+async fn sync_change_password(core: CoreState<'_>, current: String, new: String) -> Res<()> {
+    let core = Arc::clone(core.inner());
+    core.sync_change_password(&current, &new).await.map_err(err)
+}
+
+/// Desktop: closing the window first lets the frontend save the reading
+/// position and sync (it answers with `exit_app`). A second close, or 10 s
+/// without an answer, closes anyway.
+static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg_attr(mobile, allow(unused_variables))]
+fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    #[cfg(desktop)]
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        if CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        api.prevent_close();
+        let _ = window.emit("app-closing", ());
+        let app = window.app_handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            app.exit(0);
+        });
+    }
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// One sync run; a second request while one is running is a no-op.
 #[tauri::command]
 async fn sync_now(app: AppHandle, core: CoreState<'_>) -> Res<Option<SyncReport>> {
@@ -332,6 +365,7 @@ pub fn run() {
             });
             Ok(())
         })
+        .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             list_books,
             book_detail,
@@ -342,6 +376,8 @@ pub fn run() {
             sync_configure,
             sync_login,
             sync_logout,
+            sync_change_password,
+            exit_app,
             sync_now,
             delete_book,
             import_book,

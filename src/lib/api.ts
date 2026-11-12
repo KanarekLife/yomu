@@ -60,6 +60,9 @@ export const api = {
     invoke<SyncStatus>('sync_login', { serverUrl, username, password, deviceName }),
   pickFolder: () => invoke<string | null>('pick_folder'),
   syncLogout: () => invoke<SyncStatus>('sync_logout'),
+  /** Change the server account's password; signs out the account's other devices. */
+  syncChangePassword: (current: string, next: string) => invoke<void>('sync_change_password', { current, new: next }),
+  exitApp: () => invoke<void>('exit_app'),
   /** `null` when a sync was already running. */
   syncNow: () => invoke<SyncReport | null>('sync_now'),
 };

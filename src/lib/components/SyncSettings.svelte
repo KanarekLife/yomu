@@ -15,6 +15,10 @@
   let deviceName = $state('');
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let pwOpen = $state(false);
+  let pwCurrent = $state('');
+  let pwNew = $state('');
+  let pwRepeat = $state('');
   let fileAccess = $state(android?.hasAllFilesAccess() ?? true);
 
   const st = $derived(app.sync);
@@ -67,6 +71,16 @@
       app.sync = await api.syncLogout();
     });
 
+  const changePassword = () =>
+    act(async () => {
+      if (pwNew.length < 8) throw new Error('The new password must be at least 8 characters.');
+      if (pwNew !== pwRepeat) throw new Error('The new passwords don’t match.');
+      await api.syncChangePassword(pwCurrent, pwNew);
+      pwCurrent = pwNew = pwRepeat = '';
+      pwOpen = false;
+      app.toast('Password changed — your other devices need to sign in again');
+    });
+
   const useFolder = () =>
     act(async () => {
       if (isAndroid && !fileAccess) throw new Error('Allow “All files access” first.');
@@ -100,7 +114,28 @@
         <div class="inline">
           <button class="btn primary" disabled={app.syncing} onclick={() => app.runSync(true)}>{app.syncing ? 'Syncing…' : 'Sync now'}</button>
           <button class="btn" disabled={busy} onclick={signOut}>Sign out</button>
+          <button class="btn" onclick={() => ((pwOpen = !pwOpen), (error = null))}>Change password</button>
         </div>
+        {#if pwOpen}
+          <div class="body" transition:slide={{ duration: 150 }}>
+            <label class="field"><span>Current password</span>
+              <input class="input" type="password" bind:value={pwCurrent} autocomplete="current-password" />
+            </label>
+            <div class="two">
+              <label class="field"><span>New password</span>
+                <input class="input" type="password" bind:value={pwNew} autocomplete="new-password" minlength="8" />
+              </label>
+              <label class="field"><span>Repeat new password</span>
+                <input class="input" type="password" bind:value={pwRepeat} autocomplete="new-password"
+                  onkeydown={(e) => e.key === 'Enter' && changePassword()} />
+              </label>
+            </div>
+            <div class="inline">
+              <button class="btn primary" disabled={busy || !pwCurrent || !pwNew || !pwRepeat} onclick={changePassword}>{busy ? 'Saving…' : 'Set new password'}</button>
+            </div>
+            <p class="hint muted">This device stays signed in; your other devices will need to sign in again.</p>
+          </div>
+        {/if}
       {:else}
         <label class="field"><span>Server</span>
           <input class="input" bind:value={serverUrl} placeholder="https://yomu.example.com" spellcheck="false" autocapitalize="off" inputmode="url" />

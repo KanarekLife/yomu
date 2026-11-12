@@ -257,3 +257,70 @@ async fn login_sync_and_files_roundtrip() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn change_own_password() {
+    let Some((app, pool)) = setup().await else {
+        return;
+    };
+    let carol = format!("carol{}", hex::encode(rand::random::<[u8; 4]>()));
+    let carol = carol.as_str();
+    create_user(&pool, carol, "old-password").await;
+    let phone = login(&app, carol, "old-password", "phone").await;
+    let laptop = login(&app, carol, "old-password", "laptop").await;
+
+    let change = |cur: &str, new: &str| json!({ "current_password": cur, "new_password": new });
+    let (s, _) = json_call(
+        &app,
+        Method::POST,
+        "/api/v1/password",
+        Some(&phone),
+        change("wrong-one", "new-password"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = json_call(
+        &app,
+        Method::POST,
+        "/api/v1/password",
+        Some(&phone),
+        change("old-password", "short"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = json_call(
+        &app,
+        Method::POST,
+        "/api/v1/password",
+        None,
+        change("old-password", "new-password"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, _) = json_call(
+        &app,
+        Method::POST,
+        "/api/v1/password",
+        Some(&phone),
+        change("old-password", "new-password"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    // The device that changed it stays signed in; the others are signed out.
+    let (s, _) = json_call(&app, Method::GET, "/api/v1/me", Some(&phone), Value::Null).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = json_call(&app, Method::GET, "/api/v1/me", Some(&laptop), Value::Null).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // Only the new password logs in.
+    let (s, _) = json_call(
+        &app,
+        Method::POST,
+        "/api/v1/login",
+        None,
+        json!({ "username": carol, "password": "old-password" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    login(&app, carol, "new-password", "laptop").await;
+}

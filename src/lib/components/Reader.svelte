@@ -61,11 +61,23 @@
   });
 
   // ---- navigation ----------------------------------------------------------
+  /** Page turns save the position after 400 ms and sync once reading pauses for 5 s.
+   *  A sync (going to the background, closing the window) saves a pending position first. */
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let unsaved = false;
   function persist() {
+    unsaved = true;
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => api.setPosition(bookId, pos).catch(() => {}), 400);
+    saveTimer = setTimeout(save, 400);
   }
+  async function save() {
+    clearTimeout(saveTimer);
+    if (!unsaved || !detail) return;
+    unsaved = false;
+    await api.setPosition(bookId, pos).catch(() => {});
+    app.requestSync(5000);
+  }
+  const offBeforeSync = app.onBeforeSync(save);
   function jump(target: number) {
     if (!total) return;
     const t = Math.max(0, Math.min(total - 1, target));
@@ -283,6 +295,7 @@
     }
   });
   onDestroy(() => {
+    offBeforeSync();
     clearTimeout(saveTimer);
     clearTimeout(trTimer);
     releaseImages();

@@ -74,6 +74,31 @@
     app.requestSync();
   }
 
+  // ---- sync: pull down to sync (touch), or the header button -------------------
+  const PULL_AT = 64;
+  let pull = $state(0);
+  let pullStart: number | null = null;
+  const syncOn = $derived(!!app.sync && app.sync.mode !== 'off' && (app.sync.mode !== 'server' || app.sync.signed_in));
+
+  async function syncNow() {
+    await app.runSync(true);
+    refresh();
+  }
+  function touchStart(e: TouchEvent) {
+    const el = e.currentTarget as HTMLElement;
+    pullStart = syncOn && !app.syncing && el.scrollTop <= 0 ? e.touches[0].clientY : null;
+  }
+  function touchMove(e: TouchEvent) {
+    if (pullStart == null) return;
+    const dy = e.touches[0].clientY - pullStart;
+    pull = dy > 0 ? Math.min(PULL_AT * 1.5, dy * 0.5) : 0;
+  }
+  function touchEnd() {
+    if (pull >= PULL_AT) syncNow();
+    pull = 0;
+    pullStart = null;
+  }
+
   const pct = (b: BookSummary) =>
     b.sentence_count > 1 ? Math.round((b.position / (b.sentence_count - 1)) * 100) : 0;
 
@@ -104,6 +129,11 @@
 <header class="top">
   <h1>Library</h1>
   <div class="actions">
+    {#if syncOn}
+      <button class="icon-btn" class:spin={app.syncing} title="Sync now" disabled={app.syncing} onclick={syncNow}>
+        <Icon name="refresh" />
+      </button>
+    {/if}
     <button class="icon-btn" title="Settings" onclick={() => app.go({ name: 'settings', from: { name: 'library' } })}>
       <Icon name="settings" />
     </button>
@@ -113,7 +143,13 @@
   </div>
 </header>
 
-<section class="scroll" class:dragging>
+<!-- svelte-ignore a11y_no_static_element_interactions (pull to sync; the header button is the accessible route) -->
+<section class="scroll" class:dragging ontouchstart={touchStart} ontouchmove={touchMove} ontouchend={touchEnd} ontouchcancel={touchEnd}>
+  {#if pull > 0 || app.syncing}
+    <div class="pull" style="height:{app.syncing && pull === 0 ? 40 : pull}px" class:ready={pull >= PULL_AT}>
+      <span class:spin={app.syncing} style="transform:rotate({pull * 4}deg)"><Icon name="refresh" size={20} /></span>
+    </div>
+  {/if}
   {#if !loading && books.length === 0}
     <div class="empty" in:scale={{ start: 0.96, duration: 220 }}>
       <div class="glyph jp">読</div>
@@ -169,7 +205,12 @@
   }
   h1 { font-size: 26px; margin: 0; letter-spacing: -0.02em; }
   .actions { display: flex; gap: 6px; align-items: center; }
-  .scroll { flex: 1; overflow-y: auto; padding: 8px 20px calc(32px + env(safe-area-inset-bottom)); position: relative; }
+  .scroll { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; padding: 8px 20px calc(32px + env(safe-area-inset-bottom)); position: relative; }
+  .pull { display: flex; align-items: center; justify-content: center; overflow: hidden; color: var(--muted); opacity: 0.6; }
+  .pull.ready { opacity: 1; color: var(--accent); }
+  .pull span { display: inline-flex; }
+  .spin, .pull span.spin { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 22px 18px; }
   @media (min-width: 900px) { .grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); } }
   .book { min-width: 0; }

@@ -498,6 +498,22 @@ impl Core {
         Ok(self.sync_status())
     }
 
+    /// Change the signed-in account's password on the server. This device
+    /// stays signed in; the server signs out the account's other devices.
+    pub async fn sync_change_password(&self, current: &str, new: &str) -> Result<()> {
+        let c = self.config();
+        let token = c.token.as_deref().ok_or_else(|| sync_err("not signed in to a Yomu server"))?;
+        let resp = client()?
+            .post(format!("{}/api/v1/password", c.server_url))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "current_password": current, "new_password": new }))
+            .send()
+            .await
+            .map_err(|e| sync_err(format!("cannot reach the server: {e}")))?;
+        check(resp).await?;
+        Ok(())
+    }
+
     pub async fn sync_logout(&self) -> Result<SyncStatus> {
         let mut c = self.config();
         if let Some(t) = c.token.take() {

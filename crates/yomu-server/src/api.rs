@@ -30,6 +30,7 @@ pub fn router(config: &Config) -> Router<AppState> {
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/me", get(me))
+        .route("/password", post(change_password))
         .route("/version", get(version))
         .route(
             "/sync",
@@ -136,6 +137,52 @@ async fn logout(State(state): State<AppState>, user: AuthUser) -> ApiResult<Stat
 
 async fn me(user: AuthUser) -> Json<serde_json::Value> {
     Json(json!({ "username": user.username }))
+}
+
+#[derive(Deserialize)]
+struct PasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// Changes the caller's own password. The calling device stays signed in;
+/// every other device of the user is signed out.
+async fn change_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    body: Result<Json<PasswordRequest>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let req = json_body(body)?;
+    auth::validate_password(&req.new_password).map_err(ApiError::bad_request)?;
+    let mut client = state.db().await?;
+    let hash: Option<String> = client
+        .query_opt(
+            "SELECT password_hash FROM users WHERE id = $1",
+            &[&user.user_id],
+        )
+        .await?
+        .map(|r| r.get(0));
+    if !auth::verify_password(req.current_password, hash).await {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "current password is wrong",
+        ));
+    }
+    let new_hash = auth::hash_password(req.new_password).await;
+    let tx = client.transaction().await?;
+    tx.execute(
+        "UPDATE users SET password_hash = $2 WHERE id = $1",
+        &[&user.user_id, &new_hash],
+    )
+    .await?;
+    tx.execute(
+        "DELETE FROM tokens WHERE user_id = $1 AND token_hash <> $2",
+        &[&user.user_id, &user.token_hash],
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::info!(username = user.username, "password changed");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn sync_handler(
