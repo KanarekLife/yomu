@@ -1,0 +1,31 @@
+[package]
+name = "yomu-server"
+description = "Self-hosted sync server for the Yomu reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Postgres access uses tokio-postgres rather than sqlx: every sqlx version
+# (even with only the `postgres` feature) declares an optional dependency on
+# libsqlite3-sys, and Cargo's `links` check ignores features, so it conflicts
+# with reader-core's rusqlite in this workspace.
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+deadpool-postgres = "0.14"
+tokio-postgres-rustls = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+argon2 = "0.6"
+sha2 = "0.10"
+rand = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.7", features = ["trace", "limit", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

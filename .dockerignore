@@ -1,0 +1,14 @@
+# Build context for crates/yomu-server/Containerfile (repo root).
+.git
+.secrets
+target
+target-*
+node_modules
+.pnpm-store
+.cargo-container
+.android
+.kotlin
+.npm
+build
+dist
+src-tauri/gen

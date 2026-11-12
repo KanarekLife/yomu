@@ -1,0 +1,34 @@
+# Yomu sync server image. Build from the repository root:
+#   podman build -f crates/yomu-server/Containerfile -t yomu-server .
+#
+# Only `-p yomu-server` is compiled. Cargo still needs every workspace member's
+# manifest, so the other members (reader-core, src-tauri) are stubbed with
+# empty libs; their dependencies are never built.
+
+FROM docker.io/library/rust:1-bookworm AS builder
+WORKDIR /src
+
+# 1) Dependency layer: manifests + lockfile only, so it is reused until
+#    Cargo.toml/Cargo.lock change.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/reader-core/Cargo.toml crates/reader-core/
+COPY src-tauri/Cargo.toml src-tauri/
+COPY crates/yomu-server/Cargo.toml crates/yomu-server/
+RUN mkdir -p crates/reader-core/src src-tauri/src crates/yomu-server/src \
+ && touch crates/reader-core/src/lib.rs src-tauri/src/lib.rs crates/yomu-server/src/lib.rs \
+ && echo 'fn main() {}' > crates/yomu-server/src/main.rs \
+ && cargo build --release --locked -p yomu-server \
+ && rm -rf crates/yomu-server/src
+
+# 2) The server itself.
+COPY crates/yomu-server crates/yomu-server
+RUN touch crates/yomu-server/src/main.rs crates/yomu-server/src/lib.rs \
+ && cargo build --release --locked -p yomu-server \
+ && cp target/release/yomu-server /yomu-server
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /yomu-server /usr/local/bin/yomu-server
+USER 65532:65532
+EXPOSE 8080
+ENV YOMU_LISTEN=0.0.0.0:8080
+ENTRYPOINT ["/usr/local/bin/yomu-server"]

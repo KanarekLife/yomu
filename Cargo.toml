@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/reader-core", "src-tauri"]
+members = ["crates/reader-core", "crates/yomu-server", "src-tauri"]
 
 [workspace.package]
 edition = "2021"
