@@ -11,7 +11,7 @@ use crate::segment::{is_heading, split_sentences, RubySpan};
 /// made by an older importer rebuilds it in place (keeping the position).
 /// 3: illustrations are stored as steps (`sentences.image`).
 pub const IMPORT_VERSION: i64 = 3;
-use crate::{now, Core, Error, Result};
+use crate::{now, now_ms, Core, Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BookSummary {
@@ -107,7 +107,8 @@ impl Core {
                 |r| r.get(0),
             )?;
             keep_position = Some(position - images_before);
-            self.delete_book(id)?;
+            // Not a user deletion: no sync tombstone.
+            self.db().execute("DELETE FROM books WHERE id = ?1", [id])?;
         }
         let book = parse_epub(bytes.clone())?;
         if book.chapters.is_empty() {
@@ -121,8 +122,8 @@ impl Core {
             None => (None, None),
         };
         tx.execute(
-            "INSERT INTO books(title, author, language, file_hash, cover, cover_mime, added_at, import_version, position, epub) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![book.title, book.author, book.language, hash, cover, mime, now(), IMPORT_VERSION, keep_position.unwrap_or(0), bytes],
+            "INSERT INTO books(title, author, language, file_hash, cover, cover_mime, added_at, import_version, position, epub, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![book.title, book.author, book.language, hash, cover, mime, now(), IMPORT_VERSION, keep_position.unwrap_or(0), bytes, now_ms()],
         )?;
         let book_id = tx.last_insert_rowid();
         let mut idx: i64 = 0;
@@ -186,8 +187,12 @@ impl Core {
             "UPDATE books SET sentence_count = ?1, position = MIN(position, ?1 - 1) WHERE id = ?2",
             params![idx, book_id],
         )?;
+        // Imported again after being deleted: the import wins over the tombstone.
+        tx.execute("DELETE FROM sync_tombstones WHERE key = ?1", [&hash])?;
         tx.commit()?;
         drop(db);
+        // Synced metadata/translations that were waiting for this file.
+        self.apply_pending(&hash)?;
         self.book_summary(book_id)
     }
 
@@ -273,16 +278,31 @@ impl Core {
         Ok((bytes, mime.into()))
     }
 
+    /// Delete a book (user action): other devices delete it too on their next sync.
     pub fn delete_book(&self, id: i64) -> Result<()> {
         *self.epub_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        self.db().execute("DELETE FROM books WHERE id = ?1", [id])?;
+        let db = self.db();
+        let key: Option<String> =
+            db.query_row("SELECT file_hash FROM books WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        db.execute("DELETE FROM books WHERE id = ?1", [id])?;
+        if let Some(key) = key {
+            db.execute(
+                "INSERT INTO sync_tombstones(key, updated_at) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at",
+                params![key, now_ms()],
+            )?;
+            db.execute("DELETE FROM sync_pending WHERE key = ?1", [key])?;
+        }
         Ok(())
     }
 
     pub fn set_position(&self, id: i64, position: i64) -> Result<()> {
         self.db().execute(
-            "UPDATE books SET position = MAX(0, MIN(?2, sentence_count - 1)), last_read_at = ?3 WHERE id = ?1",
-            params![id, position, now()],
+            "UPDATE books SET
+                 updated_at = CASE WHEN position != MAX(0, MIN(?2, sentence_count - 1)) THEN ?4 ELSE updated_at END,
+                 position = MAX(0, MIN(?2, sentence_count - 1)), last_read_at = ?3
+             WHERE id = ?1",
+            params![id, position, now(), now_ms()],
         )?;
         Ok(())
     }
@@ -326,7 +346,7 @@ impl Core {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::test_core;
     use std::io::Write;
 

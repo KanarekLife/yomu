@@ -11,6 +11,7 @@ pub mod library;
 pub mod llm;
 pub mod nlp;
 pub mod segment;
+pub mod sync;
 pub mod text;
 
 /// HTTP client builder shared by the LLM client and dictionary downloads.
@@ -57,6 +58,8 @@ pub enum Error {
     Llm(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("sync: {0}")]
+    Sync(String),
 }
 
 impl serde::Serialize for Error {
@@ -205,6 +208,21 @@ impl Core {
         if !has_image {
             conn.execute_batch("ALTER TABLE sentences ADD COLUMN image TEXT")?;
         }
+        // v0.2: sync (ADR-0016). Change times in Unix milliseconds.
+        let has_updated: bool =
+            conn.prepare("SELECT 1 FROM pragma_table_info('books') WHERE name = 'updated_at'")?.exists([])?;
+        if !has_updated {
+            conn.execute_batch(
+                "ALTER TABLE books ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE translations ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+                 UPDATE books SET updated_at = COALESCE(last_read_at, added_at) * 1000;",
+            )?;
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_tombstones (key TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS sync_pending (
+                 key TEXT PRIMARY KEY, record TEXT NOT NULL, translations TEXT NOT NULL DEFAULT '[]');",
+        )?;
         // Remove dictionaries whose import was interrupted.
         conn.execute("DELETE FROM dictionaries WHERE complete = 0", [])?;
         Ok(Core { db_path, conn: Mutex::new(conn), epub_cache: Mutex::new(None) })
@@ -236,12 +254,43 @@ impl Core {
     }
 
     pub fn set_settings(&self, value: &serde_json::Value) -> Result<()> {
-        self.db().execute(
-            "INSERT INTO settings(key, value) VALUES('app', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [serde_json::to_string(value)?],
-        )?;
+        if self.get_settings()? == *value {
+            return Ok(()); // unchanged: don't make it look newer than other devices' copies
+        }
+        self.store_settings(value, now_ms())
+    }
+
+    pub(crate) fn store_settings(&self, value: &serde_json::Value, updated_at: i64) -> Result<()> {
+        let db = self.db();
+        let put = "INSERT INTO settings(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+        db.execute(put, ["app".to_string(), serde_json::to_string(value)?])?;
+        db.execute(put, ["app_updated_at".to_string(), updated_at.to_string()])?;
         Ok(())
     }
+
+    /// Small key/value store for internal state (sync config, device id).
+    pub(crate) fn meta(&self, key: &str) -> Option<String> {
+        self.db().query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).ok()
+    }
+
+    pub(crate) fn set_meta(&self, key: &str, value: Option<&str>) -> Result<()> {
+        let db = self.db();
+        match value {
+            Some(v) => db.execute(
+                "INSERT INTO settings(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [key, v],
+            )?,
+            None => db.execute("DELETE FROM settings WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
+}
+
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub(crate) fn now() -> i64 {

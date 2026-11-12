@@ -267,7 +267,10 @@
 
   function exit() {
     clearTimeout(saveTimer);
-    api.setPosition(bookId, pos).finally(() => app.go({ name: 'library' }));
+    api.setPosition(bookId, pos).finally(() => {
+      app.go({ name: 'library' });
+      app.requestSync(500);
+    });
   }
 
   onMount(async () => {
@@ -303,7 +306,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="content" class:raised={(lookup || optionsOpen) && vw < 680} onpointerdown={down} onpointerup={up} onpointercancel={() => (tracking = false)} onclick={closeLookup}>
+<div class="content" class:raised={optionsOpen && vw < 680} onpointerdown={down} onpointerup={up} onpointercancel={() => (tracking = false)} onclick={closeLookup}>
   <div class="inner" style="--fs:{app.settings.fontSize}px">
     {#if app.settings.showContext && prev?.text && current && !current.image}
       {#key pos}
@@ -434,7 +437,8 @@
     width: 100%; max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px;
     font-family: var(--font-jp); font-size: var(--fs);
   }
-  /* Phone: a bottom sheet / options panel is open — lift the sentence so it stays visible. */
+  /* Phone: the options panel is open — lift the sentence so it stays visible. The lookup
+     sheet is capped below the centre line instead, so the text never moves while looking up words. */
   .content.raised .inner { transform: translateY(-27vh); }
   .context { font-size: 0.5em; color: var(--muted); opacity: 0.7; text-align: center; line-height: 1.6; }
   .stage { display: grid; min-height: 3em; align-items: center; }

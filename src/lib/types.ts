@@ -17,6 +17,31 @@ export interface Token {
   punct: boolean;
 }
 
+export type SyncMode = 'off' | 'server' | 'folder';
+
+export interface SyncStatus {
+  mode: SyncMode;
+  server_url: string;
+  username: string;
+  signed_in: boolean;
+  folder: string;
+  device_name: string;
+  device_id: string;
+  last_sync_at: number | null;
+  last_error: string | null;
+}
+
+export interface SyncReport {
+  books_added: number;
+  books_updated: number;
+  books_deleted: number;
+  settings_changed: boolean;
+  translations: number;
+  files_uploaded: number;
+  files_downloaded: number;
+  waiting_for_files: number;
+}
+
 export interface SentenceView {
   idx: number;
   chapter: number;

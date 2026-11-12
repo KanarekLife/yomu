@@ -42,6 +42,7 @@
       if (b) {
         app.toast(`Imported “${b.title}”`);
         await refresh();
+        app.requestSync();
       }
     } catch (e) {
       app.toast(errorMessage(e), 'error');
@@ -62,6 +63,7 @@
     }
     importing = false;
     refresh();
+    app.requestSync();
   }
 
   async function remove(b: BookSummary) {
@@ -69,6 +71,7 @@
     if (!confirm(`Remove “${b.title}” from the library?`)) return;
     await api.deleteBook(b.id).catch((e) => app.toast(errorMessage(e), 'error'));
     books = books.filter((x) => x.id !== b.id);
+    app.requestSync();
   }
 
   const pct = (b: BookSummary) =>

@@ -296,9 +296,9 @@ impl Core {
         let mut t = parse_translation(&content);
         t.model = cfg.model.clone();
         self.db().execute(
-            "INSERT INTO translations(book_id, idx, lang, text, model) VALUES (?1,?2,?3,?4,?5)
-             ON CONFLICT(book_id, idx, lang) DO UPDATE SET text = excluded.text, model = excluded.model",
-            rusqlite::params![book_id, idx, lang, serde_json::to_string(&t)?, cfg.model],
+            "INSERT INTO translations(book_id, idx, lang, text, model, updated_at) VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(book_id, idx, lang) DO UPDATE SET text = excluded.text, model = excluded.model, updated_at = excluded.updated_at",
+            rusqlite::params![book_id, idx, lang, serde_json::to_string(&t)?, cfg.model, crate::now_ms()],
         )?;
         Ok(t)
     }

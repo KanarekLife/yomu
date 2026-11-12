@@ -7,6 +7,9 @@ import type {
   LlmConfig,
   LookupResult,
   SentenceView,
+  SyncMode,
+  SyncReport,
+  SyncStatus,
   Translation,
 } from './types';
 
@@ -50,7 +53,20 @@ export const api = {
     invoke<void>('set_dictionary_enabled', { id, enabled }),
   reorderDictionaries: (ids: number[]) => invoke<void>('reorder_dictionaries', { ids }),
   deleteDictionary: (id: number) => invoke<void>('delete_dictionary', { id }),
+  syncStatus: () => invoke<SyncStatus>('sync_status'),
+  syncConfigure: (mode: SyncMode, folder: string, deviceName: string) =>
+    invoke<SyncStatus>('sync_configure', { mode, folder, deviceName }),
+  syncLogin: (serverUrl: string, username: string, password: string, deviceName: string) =>
+    invoke<SyncStatus>('sync_login', { serverUrl, username, password, deviceName }),
+  pickFolder: () => invoke<string | null>('pick_folder'),
+  syncLogout: () => invoke<SyncStatus>('sync_logout'),
+  /** `null` when a sync was already running. */
+  syncNow: () => invoke<SyncReport | null>('sync_now'),
 };
+
+/** Android-only bridge (MainActivity.kt) for folder sync in shared storage. */
+type AndroidBridge = { hasAllFilesAccess(): boolean; requestAllFilesAccess(): void; storageRoot(): string };
+export const android: AndroidBridge | undefined = (globalThis as { YomuAndroid?: AndroidBridge }).YomuAndroid;
 
 export function errorMessage(e: unknown): string {
   if (typeof e === 'string') return e;

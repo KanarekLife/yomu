@@ -1,6 +1,6 @@
 import { listen } from '@tauri-apps/api/event';
 import { api, errorMessage } from './api';
-import type { CatalogEntry, DictionaryInfo, ImportProgress, LlmConfig, Settings } from './types';
+import type { CatalogEntry, DictionaryInfo, ImportProgress, LlmConfig, Settings, SyncReport, SyncStatus } from './types';
 
 export const LLM_PRESETS: { name: string; base_url: string; model: string; note?: string }[] = [
   { name: 'DeepSeek', base_url: 'https://api.deepseek.com', model: 'deepseek-flash' },
@@ -48,23 +48,40 @@ class AppState {
   catalog = $state<CatalogEntry[]>([]);
   /** Running dictionary install job (download/import), if any. */
   dictJob = $state<{ queue: string[]; current: string; progress: ImportProgress | null } | null>(null);
+  /** Sync (ADR-0016). */
+  sync = $state<SyncStatus | null>(null);
+  syncing = $state(false);
   #saveTimer: ReturnType<typeof setTimeout> | undefined;
+  #syncTimer: ReturnType<typeof setTimeout> | undefined;
   #toastId = 0;
+
+  async #readSettings() {
+    const stored = (await api.getSettings()) as Partial<Settings> | null;
+    if (stored && typeof stored === 'object') {
+      // Mutate in place: components hold references to `settings` / `settings.llm`.
+      Object.assign(this.settings, { ...structuredClone(DEFAULT_SETTINGS), ...stored, llm: this.settings.llm });
+      Object.assign(this.settings.llm, { ...DEFAULT_LLM, ...(stored.llm ?? {}) });
+    }
+  }
 
   async load() {
     try {
-      const stored = (await api.getSettings()) as Partial<Settings> | null;
-      if (stored && typeof stored === 'object') {
-        this.settings = {
-          ...structuredClone(DEFAULT_SETTINGS),
-          ...stored,
-          llm: { ...DEFAULT_LLM, ...(stored.llm ?? {}) },
-        };
-      }
+      await this.#readSettings();
     } catch (e) {
       this.toast(errorMessage(e), 'error');
     }
     this.loaded = true;
+    // Another device's settings arrived through sync.
+    listen('settings-changed', () => this.#readSettings().catch(() => {}));
+    api.syncStatus().then((s) => {
+      this.sync = s;
+      this.runSync();
+    }).catch(() => {});
+    setInterval(() => this.runSync(), 5 * 60_000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') this.runSync();
+      else this.requestSync(1000);
+    });
     listen<ImportProgress>('dict-import-progress', (e) => {
       if (this.dictJob) this.dictJob.progress = e.payload;
     });
@@ -132,7 +149,34 @@ class AppState {
     clearTimeout(this.#saveTimer);
     this.#saveTimer = setTimeout(() => {
       api.setSettings($state.snapshot(this.settings)).catch((e) => this.toast(errorMessage(e), 'error'));
+      this.requestSync(15_000);
     }, 300);
+  }
+
+  /** Sync soon (debounced), e.g. after importing a book or leaving the reader. */
+  requestSync(delay = 2000) {
+    if (!this.sync || this.sync.mode === 'off') return;
+    clearTimeout(this.#syncTimer);
+    this.#syncTimer = setTimeout(() => this.runSync(), delay);
+  }
+
+  /** One sync now. `manual` shows the outcome; background syncs stay quiet. */
+  async runSync(manual = false): Promise<SyncReport | null> {
+    if (!this.sync || this.sync.mode === 'off' || this.syncing) return null;
+    if (this.sync.mode === 'server' && !this.sync.signed_in) return null;
+    clearTimeout(this.#syncTimer);
+    this.syncing = true;
+    let rep: SyncReport | null = null;
+    try {
+      rep = await api.syncNow();
+      if (manual && rep) this.toast(describeSync(rep));
+    } catch (e) {
+      if (manual) this.toast(errorMessage(e), 'error');
+    } finally {
+      this.syncing = false;
+      this.sync = await api.syncStatus().catch(() => this.sync);
+    }
+    return rep;
   }
 
   toast(text: string, kind: 'info' | 'error' = 'info') {
@@ -147,3 +191,15 @@ class AppState {
 }
 
 export const app = new AppState();
+
+function describeSync(r: SyncReport): string {
+  const parts: string[] = [];
+  if (r.books_added) parts.push(`${r.books_added} book${r.books_added > 1 ? 's' : ''} added`);
+  if (r.books_updated) parts.push(`${r.books_updated} updated`);
+  if (r.books_deleted) parts.push(`${r.books_deleted} removed`);
+  if (r.settings_changed) parts.push('settings updated');
+  if (r.translations) parts.push(`${r.translations} translations`);
+  if (r.files_uploaded) parts.push(`${r.files_uploaded} uploaded`);
+  if (r.waiting_for_files) parts.push(`${r.waiting_for_files} waiting for their EPUB`);
+  return parts.length ? `Synced: ${parts.join(', ')}` : 'Synced — everything up to date';
+}

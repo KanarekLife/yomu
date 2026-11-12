@@ -5,6 +5,7 @@ use std::sync::Arc;
 use reader_core::dict::{DictionaryInfo, ImportProgress, LookupResult};
 use reader_core::library::{BookDetail, BookSummary, SentenceView};
 use reader_core::llm::{LlmConfig, Translation};
+use reader_core::sync::{SyncMode, SyncReport, SyncStatus};
 use reader_core::{Core, Error};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -139,6 +140,77 @@ async fn cached_translation(core: CoreState<'_>, book_id: i64, idx: i64) -> Res<
     .await
 }
 
+// ---- sync (ADR-0016) -------------------------------------------------------
+
+static SYNCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+async fn sync_status(core: CoreState<'_>) -> Res<SyncStatus> {
+    blocking(&core, |c| Ok(c.sync_status())).await
+}
+
+#[tauri::command]
+async fn sync_configure(core: CoreState<'_>, mode: SyncMode, folder: String, device_name: String) -> Res<SyncStatus> {
+    blocking(&core, move |c| c.sync_configure(mode, folder, device_name)).await
+}
+
+/// Desktop folder picker for folder sync (Android uses a typed path).
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Res<Option<String>> {
+    #[cfg(desktop)]
+    {
+        let picked = tauri::async_runtime::spawn_blocking(move || {
+            app.dialog().file().set_title("Sync folder").blocking_pick_folder()
+        })
+        .await
+        .map_err(err)?;
+        Ok(picked.and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+    }
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn sync_login(
+    core: CoreState<'_>,
+    server_url: String,
+    username: String,
+    password: String,
+    device_name: String,
+) -> Res<SyncStatus> {
+    let core = Arc::clone(core.inner());
+    core.sync_login(&server_url, &username, &password, &device_name).await.map_err(err)
+}
+
+#[tauri::command]
+async fn sync_logout(core: CoreState<'_>) -> Res<SyncStatus> {
+    let core = Arc::clone(core.inner());
+    core.sync_logout().await.map_err(err)
+}
+
+/// One sync run; a second request while one is running is a no-op.
+#[tauri::command]
+async fn sync_now(app: AppHandle, core: CoreState<'_>) -> Res<Option<SyncReport>> {
+    use std::sync::atomic::Ordering;
+    if SYNCING.swap(true, Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let core = Arc::clone(core.inner());
+    let r = tauri::async_runtime::spawn(async move { core.sync_now().await }).await;
+    SYNCING.store(false, Ordering::SeqCst);
+    let rep = r.map_err(err)?.map_err(err)?;
+    if rep.books_added + rep.books_updated + rep.books_deleted > 0 {
+        let _ = app.emit("library-changed", rep.books_added + rep.books_updated + rep.books_deleted);
+    }
+    if rep.settings_changed {
+        let _ = app.emit("settings-changed", ());
+    }
+    Ok(Some(rep))
+}
+
 #[tauri::command]
 async fn test_llm(core: CoreState<'_>, config: LlmConfig) -> Res<String> {
     let core = Arc::clone(core.inner());
@@ -265,6 +337,12 @@ pub fn run() {
             book_detail,
             book_cover,
             book_image,
+            sync_status,
+            pick_folder,
+            sync_configure,
+            sync_login,
+            sync_logout,
+            sync_now,
             delete_book,
             import_book,
             import_book_path,

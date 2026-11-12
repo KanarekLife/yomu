@@ -125,7 +125,7 @@
     box-shadow: var(--shadow); font-size: 15px; overscroll-behavior: contain;
   }
   .popup.sheet {
-    left: 0; right: 0; bottom: 0; width: auto; max-height: 62vh; border-radius: 18px 18px 0 0;
+    left: 0; right: 0; bottom: 0; width: auto; max-height: 44vh; border-radius: 18px 18px 0 0;
     padding-bottom: calc(16px + env(safe-area-inset-bottom)); border-bottom: none;
   }
   .grab { width: 40px; height: 4px; border-radius: 2px; background: var(--border); margin: -4px auto 10px; }

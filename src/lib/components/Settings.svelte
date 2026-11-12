@@ -11,6 +11,7 @@
   let version = $state('');
   getVersion().then((v) => (version = v), () => {});
   import DictionarySetup from './DictionarySetup.svelte';
+  import SyncSettings from './SyncSettings.svelte';
 
   const s = app.settings;
   let moreDicts = $state(false);
@@ -193,6 +194,11 @@
         </div>
       {/if}
       <p class="hint muted">Each sentence is sent with a few preceding sentences as context. The reply contains a translation, a literal rendering, a word-by-word breakdown and grammar notes. Results are cached on this device.</p>
+    </section>
+
+    <section>
+      <h2>Sync</h2>
+      <SyncSettings />
     </section>
 
     <section>

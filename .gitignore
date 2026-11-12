@@ -12,3 +12,6 @@ target-android/
 .npm/
 scripts/screenshots/fixtures.json
 .pnpm-store/
+
+# Claude Code local state (worktrees etc.)
+.claude/
